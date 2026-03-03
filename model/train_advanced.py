@@ -1,12 +1,5 @@
 """
-HemoLens — Advanced SOTA Hybrid Search
-
-Extends the hybrid approach by evaluating advanced gradient-boosted trees
-and stacking ensembles on the concatenated (CNN + hand-crafted) features.
-Optuna can be added here for hyperparameter search if needed.
-
-Usage:
-    python train_advanced.py
+HemoLens - Hybrid Search (Crop-Level)
 """
 
 import warnings
@@ -18,7 +11,6 @@ import torch
 import yaml
 from PIL import Image
 from sklearn.linear_model import RidgeCV
-from sklearn.ensemble import StackingRegressor, RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -36,7 +28,6 @@ from transforms import get_val_transforms
 warnings.filterwarnings("ignore")
 
 def extract_features(cfg):
-    print("Extracting features (this takes ~20 seconds)...")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     backbone_name = cfg["model"]["backbone"]
@@ -46,11 +37,11 @@ def extract_features(cfg):
     df = pd.read_csv(cfg["data"]["metadata_csv"])
     
     features_list, hb_list, pid_list, split_list = [], [], [], []
-    root = Path(cfg["data"]["root"])
+    root = Path("../data/raw")
     
     with torch.no_grad():
         for _, row in tqdm(df.iterrows(), total=len(df), leave=False):
-            img = Image.open(root / row["image_path"]).convert("RGB")
+            img = Image.open(root / "photo" / row["image_path"]).convert("RGB")
             tensor = tf(img).unsqueeze(0).to(device)
             feat = backbone(tensor).squeeze(0).cpu().numpy()
             features_list.append(feat)
@@ -58,78 +49,31 @@ def extract_features(cfg):
             pid_list.append(row["patient_id"])
             split_list.append(row["split"])
             
-    features = np.stack(features_list)
-    return features, np.array(hb_list), np.array(pid_list), np.array(split_list)
+    return np.stack(features_list), np.array(hb_list), np.array(pid_list), np.array(split_list)
 
-def build_dataset(cfg, cnn_features, hb_values, patient_ids, splits):
-    unique_pids = np.unique(patient_ids)
+def build_dataset_crop_level(cnn_features, hb_values, patient_ids, splits):
+    X = cnn_features
     
-    # 1. Average CNN features per patient
-    patient_cnn, patient_hb, patient_split = {}, {}, {}
-    for pid in unique_pids:
-        m = patient_ids == pid
-        patient_cnn[pid] = cnn_features[m].mean(axis=0)
-        patient_hb[pid] = hb_values[m][0]
-        patient_split[pid] = splits[m][0]
-        
-    ordered_pids = sorted(unique_pids)
-    X_cnn = np.stack([patient_cnn[p] for p in ordered_pids])
-    y = np.array([patient_hb[p] for p in ordered_pids])
-    split_arr = np.array([patient_split[p] for p in ordered_pids])
-    
-    # 2. Add color features
-    color_df = pd.read_csv("../data/processed/color_features.csv").sort_values("PATIENT_ID").reset_index(drop=True)
-    feat_cols = [c for c in color_df.columns if c not in ("PATIENT_ID", "hb_gdL", "HB_LEVEL_GperL")]
-    color_mat = color_df[feat_cols].values
-    pid_to_color = {pid: color_mat[i] for i, pid in enumerate(color_df["PATIENT_ID"].values)}
-    
-    X = X_cnn
-    
-    # 3. Create splits
-    result = {}
+    result = {"train": {}, "val": {}, "test": {}}
     for s in ["train", "val", "test"]:
-        m = split_arr == s
-        result[s] = {"X": X[m], "y": y[m], "pids": np.array(ordered_pids)[m]}
+        m = splits == s
+        result[s] = {"X": X[m], "y": hb_values[m], "pids": patient_ids[m]}
     return result
 
-def evaluate_models(data):
-    X_train, y_train = data["train"]["X"], data["train"]["y"]
-    X_val, y_val = data["val"]["X"], data["val"]["y"]
-    X_test, y_test = data["test"]["X"], data["test"]["y"]
+def evaluate_models_crop_level(data):
+    X_train, y_train, pids_train = data["train"]["X"], data["train"]["y"], data["train"]["pids"]
+    X_val, y_val, pids_val = data["val"]["X"], data["val"]["y"], data["val"]["pids"]
+    X_test, y_test, pids_test = data["test"]["X"], data["test"]["y"], data["test"]["pids"]
     
-    # Define models
     models = {
-        "Ridge": Pipeline([
-            ("scaler", StandardScaler()),
-            ("model", RidgeCV(alphas=np.logspace(-3, 5, 100), cv=5))
-        ]),
-        "XGBoost": xgb.XGBRegressor(
-            n_estimators=300, max_depth=3, learning_rate=0.05,
-            subsample=0.8, colsample_bytree=0.8, random_state=42, n_jobs=-1
-        ),
-        "LightGBM": lgb.LGBMRegressor(
-            n_estimators=300, max_depth=3, learning_rate=0.05,
-            subsample=0.8, colsample_bytree=0.8, random_state=42, verbose=-1, n_jobs=-1
-        ),
-        "CatBoost": CatBoostRegressor(
-            iterations=300, depth=4, learning_rate=0.05,
-            random_seed=42, verbose=0, thread_count=-1
-        ),
+        "Ridge": Pipeline([("scaler", StandardScaler()), ("model", RidgeCV(alphas=np.logspace(-3, 5, 100), cv=5))]),
+        "CatBoost": CatBoostRegressor(iterations=700, depth=6, learning_rate=0.03, l2_leaf_reg=5, random_seed=42, verbose=0),
+        "XGBoost": xgb.XGBRegressor(n_estimators=700, max_depth=5, learning_rate=0.03, subsample=0.7, colsample_bytree=0.7, reg_lambda=5, random_state=42, n_jobs=-1),
+        "LightGBM": lgb.LGBMRegressor(n_estimators=700, max_depth=5, learning_rate=0.03, subsample=0.7, colsample_bytree=0.7, reg_lambda=5, random_state=42, verbose=-1, n_jobs=-1),
     }
-    
-    # Ridge and RF for Level 0 estimators in Stacking
-    l0_ridge = Pipeline([("scaler", StandardScaler()), ("model", RidgeCV(alphas=np.logspace(-3, 5, 50)))])
-    l0_lgb = lgb.LGBMRegressor(n_estimators=100, max_depth=3, learning_rate=0.1, verbose=-1)
-    l0_cat = CatBoostRegressor(iterations=100, depth=4, learning_rate=0.1, verbose=0)
-    
-    models["Stacking (Ridge+LGBM+Cat -> Ridge)"] = StackingRegressor(
-        estimators=[('ridge', l0_ridge), ('lgbm', l0_lgb), ('cat', l0_cat)],
-        final_estimator=RidgeCV(alphas=np.logspace(-3, 3, 50)),
-        cv=5
-    )
 
     print("\n" + "="*60)
-    print(f"Training on {X_train.shape[0]} patients, {X_train.shape[1]} features")
+    print(f"Training on CROP LEVEL (CNN-only): {X_train.shape[0]} crops, {X_train.shape[1]} features")
     print("="*60)
     
     best_mae = float('inf')
@@ -139,16 +83,21 @@ def evaluate_models(data):
         print(f"\n--- {name} ---")
         model.fit(X_train, y_train)
         
-        preds_val = model.predict(X_val)
-        preds_test = model.predict(X_test)
+        preds_val_crops = model.predict(X_val)
+        preds_test_crops = model.predict(X_test)
         
-        v_mae = mean_absolute_error(y_val, preds_val)
-        t_mae = mean_absolute_error(y_test, preds_test)
-        t_rmse = np.sqrt(mean_squared_error(y_test, preds_test))
-        t_r2 = r2_score(y_test, preds_test)
+        val_df = pd.DataFrame({"pid": pids_val, "true": y_val, "pred": preds_val_crops})
+        val_agg = val_df.groupby("pid").mean()
+        v_mae = mean_absolute_error(val_agg["true"], val_agg["pred"])
         
-        print(f"  Val MAE:  {v_mae:.3f} g/dL")
-        print(f"  Test MAE: {t_mae:.3f} g/dL | RMSE: {t_rmse:.3f} | R\u00b2: {t_r2:.3f}")
+        test_df = pd.DataFrame({"pid": pids_test, "true": y_test, "pred": preds_test_crops})
+        test_agg = test_df.groupby("pid").mean()
+        t_mae = mean_absolute_error(test_agg["true"], test_agg["pred"])
+        t_rmse = np.sqrt(mean_squared_error(test_agg["true"], test_agg["pred"]))
+        t_r2 = r2_score(test_agg["true"], test_agg["pred"])
+        
+        print(f"  Val MAE (patient):  {v_mae:.3f} g/dL")
+        print(f"  Test MAE (patient): {t_mae:.3f} g/dL | RMSE: {t_rmse:.3f} | R2: {t_r2:.3f}")
         
         if t_mae < best_mae:
             best_mae = t_mae
@@ -157,9 +106,12 @@ def evaluate_models(data):
     print(f"\n✅ Best Test MAE: {best_mae:.3f} g/dL with {best_name}")
 
 if __name__ == "__main__":
-    with open("configs/mobilenet_edge.yaml") as f:
+    with open("configs/vit_base.yaml") as f:
         cfg = yaml.safe_load(f)
         
+    cfg["model"]["backbone"] = "mobilenetv4_conv_small.e2400_r224_in1k"
+    cfg["model"]["input_size"] = [3, 224, 224]
+        
     cnn_feats, hb_vals, pids, splits = extract_features(cfg)
-    data = build_dataset(cfg, cnn_feats, hb_vals, pids, splits)
-    evaluate_models(data)
+    data = build_dataset_crop_level(cnn_feats, hb_vals, pids, splits)
+    evaluate_models_crop_level(data)
