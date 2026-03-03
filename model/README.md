@@ -1,29 +1,48 @@
 # model/
 
-PyTorch training pipeline for the HemoLens ViT regression model, plus TFLite export with INT8 quantization.
+PyTorch training pipeline for the HemoLens regression model with TFLite export.
+
+Supports any timm backbone — default edge config uses **MobileNetV3-Small** (~2.5M params, ~1 MB INT8).
 
 ## Files
 
 | File | Description |
 |------|-------------|
-| `train.py` | Main training loop — ViT backbone + regression head |
-| `export_tflite.py` | Convert PyTorch checkpoint → ONNX → TFLite (INT8) |
+| `prepare_dataset.py` | Crop nail ROIs from raw photos → `data/processed/nail_crops/` |
+| `train.py` | Backbone-agnostic training with progressive unfreezing |
+| `export_tflite.py` | Convert PyTorch checkpoint → ONNX → TFLite (INT8/FP16) |
 | `dataset.py` | Custom `Dataset` class for fingernail images + Hb labels |
-| `transforms.py` | Training/validation augmentation pipelines |
-| `configs/vit_base.yaml` | Hyperparameter configuration |
+| `transforms.py` | Augmentation pipelines (color jitter, random erasing, etc.) |
+| `configs/mobilenet_edge.yaml` | **Edge-optimized** — MobileNetV3-Small, heavy regularization |
+| `configs/vit_base.yaml` | ViT-Small/16 config (larger, research-grade) |
 
 ## Usage
 
 ```bash
-# Train
-python train.py --config configs/vit_base.yaml
+# 1. Prepare dataset (crop nail ROIs, create train/val/test splits)
+python prepare_dataset.py
 
-# Export to TFLite
+# 2. Train edge model
+python train.py --config configs/mobilenet_edge.yaml
+
+# 3. Export to TFLite
 python export_tflite.py --checkpoint checkpoints/best_model.pth --quantize int8
 ```
 
-## Architecture
+## Architecture (Edge)
 
 ```
-Input (224×224×3) → ViT-Small/16 (pretrained, timm) → [CLS] token → Linear(384→128) → ReLU → Dropout → Linear(128→1) → Hb (g/dL)
+Input (224×224×3)
+  → MobileNetV3-Small (pretrained, timm) → Global Pool → [576-dim]
+  → Linear(576→64) → ReLU → Dropout(0.4)
+  → Linear(64→1) → Hb (g/dL)
 ```
+
+## Training Strategy (Small-Data Regime)
+
+- **750 nail-crop images** from 250 patients (3 crops/patient)
+- Patient-level stratified splits (70/15/15) to prevent leakage
+- Progressive unfreezing: head-only → full fine-tuning with differential LR
+- Aggressive augmentation: color jitter, rotation ±20°, random erasing, random resized crop
+- Label noise (σ=0.1 g/dL) + Huber loss (δ=1.5) for outlier robustness
+- Early stopping with patience=15

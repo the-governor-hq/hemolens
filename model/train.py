@@ -1,10 +1,12 @@
 """
-HemoLens — ViT Training Script
+HemoLens — Model Training Script
 
-Train a Vision Transformer regression model for hemoglobin estimation
-from fingernail bed images.
+Train a backbone + regression head for hemoglobin estimation
+from fingernail bed images.  Supports any timm backbone
+(MobileNetV3, EfficientNet, ViT, etc.).
 
 Usage:
+    python train.py --config configs/mobilenet_edge.yaml
     python train.py --config configs/vit_base.yaml
 """
 
@@ -35,12 +37,12 @@ from transforms import get_train_transforms, get_val_transforms
 # ---------------------------------------------------------------------------
 
 
-class HemoLensViT(nn.Module):
+class HemoLensModel(nn.Module):
     """
-    ViT backbone + regression head for Hb estimation.
+    Backbone-agnostic regression model for Hb estimation.
 
-    Architecture:
-        ViT-Small/16 (pretrained) → [CLS] → FC(384→128) → ReLU → Dropout → FC(128→1)
+    Works with any timm backbone (MobileNetV3, EfficientNet, ViT, etc.).
+    Architecture:  backbone → global pool → FC → ReLU → Dropout → FC → Hb (scalar)
     """
 
     def __init__(self, backbone_name: str, pretrained: bool, hidden_dim: int, dropout: float):
@@ -59,6 +61,16 @@ class HemoLensViT(nn.Module):
         features = self.backbone(x)  # [B, embed_dim]
         return self.head(features).squeeze(-1)  # [B]
 
+    def freeze_backbone(self):
+        """Freeze backbone parameters — train head only."""
+        for p in self.backbone.parameters():
+            p.requires_grad = False
+
+    def unfreeze_backbone(self):
+        """Unfreeze backbone for full fine-tuning."""
+        for p in self.backbone.parameters():
+            p.requires_grad = True
+
 
 # ---------------------------------------------------------------------------
 # Training Loop
@@ -72,6 +84,7 @@ def train_one_epoch(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     log_interval: int = 10,
+    label_noise_std: float = 0.0,
 ) -> float:
     model.train()
     running_loss = 0.0
@@ -80,6 +93,10 @@ def train_one_epoch(
     for batch_idx, (images, targets) in enumerate(tqdm(loader, desc="Train", leave=False)):
         images = images.to(device)
         targets = targets.to(device)
+
+        # Label noise regularization
+        if label_noise_std > 0:
+            targets = targets + torch.randn_like(targets) * label_noise_std
 
         optimizer.zero_grad()
         outputs = model(images)
@@ -193,7 +210,7 @@ def main():
 
     # Model
     model_cfg = cfg["model"]
-    model = HemoLensViT(
+    model = HemoLensModel(
         backbone_name=model_cfg["backbone"],
         pretrained=model_cfg["pretrained"],
         hidden_dim=model_cfg["head"]["hidden_dim"],
@@ -202,7 +219,20 @@ def main():
 
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Model parameters: {total_params:,} total, {trainable_params:,} trainable")
+    print(f"Model: {model_cfg['backbone']}")
+    print(f"Parameters: {total_params:,} total, {trainable_params:,} trainable")
+
+    # Progressive unfreezing: freeze backbone for first N epochs
+    freeze_epochs = train_cfg.get("freeze_backbone_epochs", 0)
+    if freeze_epochs > 0:
+        model.freeze_backbone()
+        trainable_after_freeze = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"Backbone frozen for {freeze_epochs} epochs ({trainable_after_freeze:,} trainable params)")
+
+    # Label noise for regularization
+    label_noise_std = train_cfg.get("label_noise_std", 0.0)
+    if label_noise_std > 0:
+        print(f"Label noise: σ={label_noise_std:.2f} g/dL")
 
     # Loss
     loss_cfg = cfg["loss"]
@@ -241,12 +271,27 @@ def main():
     patience_counter = 0
 
     for epoch in range(1, train_cfg["epochs"] + 1):
+        # Progressive unfreezing
+        if freeze_epochs > 0 and epoch == freeze_epochs + 1:
+            model.unfreeze_backbone()
+            # Apply lower LR to backbone
+            unfreeze_factor = train_cfg.get("unfreeze_lr_factor", 0.1)
+            optimizer = AdamW([
+                {"params": model.backbone.parameters(), "lr": train_cfg["learning_rate"] * unfreeze_factor},
+                {"params": model.head.parameters(), "lr": train_cfg["learning_rate"]},
+            ], weight_decay=train_cfg["weight_decay"])
+            # Reset scheduler for remaining epochs
+            remaining = train_cfg["epochs"] - epoch + 1
+            scheduler = CosineAnnealingLR(optimizer, T_max=remaining)
+            print(f"\n>>> Backbone unfrozen — backbone LR={train_cfg['learning_rate'] * unfreeze_factor:.2e}")
+
         print(f"\n{'='*60}")
         print(f"Epoch {epoch}/{train_cfg['epochs']}  (lr={optimizer.param_groups[0]['lr']:.2e})")
         print(f"{'='*60}")
 
         train_loss = train_one_epoch(
-            model, train_loader, criterion, optimizer, device, cfg["logging"]["log_interval"]
+            model, train_loader, criterion, optimizer, device, cfg["logging"]["log_interval"],
+            label_noise_std=label_noise_std,
         )
         val_metrics = evaluate(model, val_loader, criterion, device)
 

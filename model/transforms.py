@@ -6,11 +6,11 @@ from torchvision import transforms
 
 
 def get_train_transforms(input_size: int = 224, config: dict | None = None) -> transforms.Compose:
-    """Training augmentation pipeline with color jitter, flips, and rotation."""
+    """Training augmentation pipeline with color jitter, flips, rotation, and optional erasing."""
     cfg = config or {}
     cj = cfg.get("color_jitter", {})
 
-    return transforms.Compose([
+    aug_list = [
         transforms.RandomResizedCrop(input_size, scale=(0.8, 1.0)),
         transforms.RandomHorizontalFlip(p=cfg.get("horizontal_flip", 0.5)),
         transforms.RandomRotation(degrees=cfg.get("random_rotation", 15)),
@@ -25,7 +25,14 @@ def get_train_transforms(input_size: int = 224, config: dict | None = None) -> t
             mean=cfg.get("normalize", {}).get("mean", [0.485, 0.456, 0.406]),
             std=cfg.get("normalize", {}).get("std", [0.229, 0.224, 0.225]),
         ),
-    ])
+    ]
+
+    # Random erasing (CutOut-style) — helps with small datasets
+    random_erasing = cfg.get("random_erasing", 0.0)
+    if random_erasing > 0:
+        aug_list.append(transforms.RandomErasing(p=random_erasing, scale=(0.02, 0.15)))
+
+    return transforms.Compose(aug_list)
 
 
 def get_val_transforms(input_size: int = 224, config: dict | None = None) -> transforms.Compose:

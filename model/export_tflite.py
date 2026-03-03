@@ -1,7 +1,7 @@
 """
 HemoLens — TFLite Export Script
 
-Convert a trained PyTorch HemoLensViT checkpoint to TFLite format
+Convert a trained PyTorch HemoLensModel checkpoint to TFLite format
 with optional INT8 quantization for on-device inference.
 
 Pipeline: PyTorch → ONNX → TensorFlow SavedModel → TFLite
@@ -20,14 +20,14 @@ import torch
 
 
 def load_model(checkpoint_path: str) -> tuple:
-    """Load a HemoLensViT model from checkpoint."""
-    from train import HemoLensViT
+    """Load a HemoLensModel from checkpoint."""
+    from train import HemoLensModel
 
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     cfg = ckpt["config"]
     model_cfg = cfg["model"]
 
-    model = HemoLensViT(
+    model = HemoLensModel(
         backbone_name=model_cfg["backbone"],
         pretrained=False,
         hidden_dim=model_cfg["head"]["hidden_dim"],
