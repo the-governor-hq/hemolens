@@ -37,11 +37,11 @@ def extract_features(cfg):
     df = pd.read_csv(cfg["data"]["metadata_csv"])
     
     features_list, hb_list, pid_list, split_list = [], [], [], []
-    root = Path("../data/raw")
+    root = Path(cfg["data"]["root"])
     
     with torch.no_grad():
         for _, row in tqdm(df.iterrows(), total=len(df), leave=False):
-            img = Image.open(root / "photo" / row["image_path"]).convert("RGB")
+            img = Image.open(root / row["image_path"]).convert("RGB")
             tensor = tf(img).unsqueeze(0).to(device)
             feat = backbone(tensor).squeeze(0).cpu().numpy()
             features_list.append(feat)
@@ -110,7 +110,7 @@ if __name__ == "__main__":
         cfg = yaml.safe_load(f)
         
     cfg["model"]["backbone"] = "mobilenetv4_conv_small.e2400_r224_in1k"
-    cfg["model"]["input_size"] = [3, 224, 224]
+    cfg["model"]["input_size"] = 224
         
     cnn_feats, hb_vals, pids, splits = extract_features(cfg)
     data = build_dataset_crop_level(cnn_feats, hb_vals, pids, splits)
