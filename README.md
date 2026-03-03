@@ -2,7 +2,7 @@
 
 **A high-performance, offline Flutter engine for non-invasive hemoglobin level estimation.**
 
-Powered by MobileNetV3-Small and optimized for on-device inference (~1 MB INT8, <5 ms latency) using the 2024 Yakimov et al. fingernail dataset.
+Powered by MobileNetV4-Conv-Small and optimized for on-device inference (~1 MB INT8, <5 ms latency) using the 2024 Yakimov et al. fingernail dataset.
 
 ---
 
@@ -23,7 +23,7 @@ HemoLens/
 HemoLens estimates hemoglobin (Hb) levels from smartphone camera images of fingernail beds — no blood draw required. The pipeline:
 
 1. **Research** — EDA on the Yakimov et al. (2024) fingernail image dataset, color-space feature extraction (RGB, LAB, HSV), and traditional ML baselines (Ridge, SVR, Gradient Boosting).
-2. **Model** — Fine-tune a MobileNetV3-Small backbone with a regression head on nail-bed ROI crops. Progressive unfreezing, aggressive augmentation, and Huber loss for small-data robustness. Export to TFLite with INT8 quantization.
+2. **Model** — Fine-tune a MobileNetV4-Conv-Small backbone with a regression head on nail-bed ROI crops. Progressive unfreezing, aggressive augmentation, and Huber loss for small-data robustness. Export to TFLite with INT8 quantization.
 3. **Flutter Plugin** — On-device inference engine wrapping TFLite via `dart:ffi` / platform channels, with real-time camera preprocessing.
 4. **Example App** — A turnkey Flutter application demonstrating live Hb estimation from the device camera.
 
@@ -42,7 +42,7 @@ HemoLens estimates hemoglobin (Hb) levels from smartphone camera images of finge
 ## Key Features
 
 - **Offline-first**: All inference runs on-device — no cloud dependency.
-- **Sub-5ms latency**: INT8-quantized MobileNetV3-Small targeting mobile NPU/GPU delegates.
+- **Sub-5ms latency**: INT8-quantized MobileNetV4-Conv-Small targeting mobile NPU/GPU delegates.
 - **~1 MB model**: Edge-optimized — 2.5M params quantized to INT8.
 - **Cross-platform**: Android (NNAPI) and iOS (Core ML delegate) support.
 - **Privacy-preserving**: No images leave the device.
@@ -86,9 +86,9 @@ flutter run
 
 ```
 Input (224×224×3)
-  → MobileNetV3-Small (pretrained, timm)
-  → Global Pool → [576-dim]
-  → Linear(576→64) → ReLU → Dropout(0.4)
+  → MobileNetV4-Conv-Small (pretrained, timm)
+  → Global Pool → [1280-dim]
+  → Linear(1280→64) → ReLU → Dropout(0.4)
   → Linear(64→1) → Hb (g/dL)
 ```
 

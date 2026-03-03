@@ -2,7 +2,7 @@
 
 PyTorch training pipeline for the HemoLens regression model with TFLite export.
 
-Supports any timm backbone — default edge config uses **MobileNetV3-Small** (~2.5M params, ~1 MB INT8).
+Supports any timm backbone — default edge config uses **MobileNetV4-Conv-Small** (~2.5M params, ~1 MB INT8).
 
 ## Files
 
@@ -13,7 +13,7 @@ Supports any timm backbone — default edge config uses **MobileNetV3-Small** (~
 | `export_tflite.py` | Convert PyTorch checkpoint → ONNX → TFLite (INT8/FP16) |
 | `dataset.py` | Custom `Dataset` class for fingernail images + Hb labels |
 | `transforms.py` | Augmentation pipelines (color jitter, random erasing, etc.) |
-| `configs/mobilenet_edge.yaml` | **Edge-optimized** — MobileNetV3-Small, heavy regularization |
+| `configs/mobilenet_edge.yaml` | **Edge-optimized** — MobileNetV4-Conv-Small, heavy regularization |
 | `configs/vit_base.yaml` | ViT-Small/16 config (larger, research-grade) |
 
 ## Usage
@@ -33,8 +33,8 @@ python export_tflite.py --checkpoint checkpoints/best_model.pth --quantize int8
 
 ```
 Input (224×224×3)
-  → MobileNetV3-Small (pretrained, timm) → Global Pool → [576-dim]
-  → Linear(576→64) → ReLU → Dropout(0.4)
+  → MobileNetV4-Conv-Small (pretrained, timm) → Global Pool → [1280-dim]
+  → Linear(1280→64) → ReLU → Dropout(0.4)
   → Linear(64→1) → Hb (g/dL)
 ```
 

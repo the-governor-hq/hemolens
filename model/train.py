@@ -48,7 +48,13 @@ class HemoLensModel(nn.Module):
     def __init__(self, backbone_name: str, pretrained: bool, hidden_dim: int, dropout: float):
         super().__init__()
         self.backbone = timm.create_model(backbone_name, pretrained=pretrained, num_classes=0)
-        embed_dim = self.backbone.num_features
+
+        # Auto-detect actual output dim (eval mode avoids BatchNorm single-sample error)
+        self.backbone.eval()
+        with torch.no_grad():
+            dummy = torch.randn(2, 3, 224, 224)
+            embed_dim = self.backbone(dummy).shape[-1]
+        self.backbone.train()
 
         self.head = nn.Sequential(
             nn.Linear(embed_dim, hidden_dim),
@@ -193,19 +199,22 @@ def main():
     val_ds = FingernailHbDataset(data_cfg["root"], data_cfg["metadata_csv"], "val", val_tf)
 
     train_cfg = cfg["training"]
+    use_cuda = device.type == "cuda"
+    num_workers = 4 if use_cuda else 0
+
     train_loader = DataLoader(
         train_ds,
         batch_size=train_cfg["batch_size"],
         shuffle=True,
-        num_workers=4,
-        pin_memory=True,
+        num_workers=num_workers,
+        pin_memory=use_cuda,
     )
     val_loader = DataLoader(
         val_ds,
         batch_size=train_cfg["batch_size"],
         shuffle=False,
-        num_workers=4,
-        pin_memory=True,
+        num_workers=num_workers,
+        pin_memory=use_cuda,
     )
 
     # Model

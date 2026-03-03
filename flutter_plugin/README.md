@@ -2,7 +2,7 @@
 
 The core HemoLens Flutter plugin — wraps TFLite inference for on-device hemoglobin estimation.
 
-Designed around the edge-optimized MobileNetV3-Small backbone (~1 MB INT8, <5 ms inference).
+Designed around the edge-optimized MobileNetV4-Conv-Small backbone (~1 MB INT8, <5 ms inference).
 
 ## Architecture
 

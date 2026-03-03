@@ -1,9 +1,10 @@
-# HemoLens — MobileNetV3-Small Edge Configuration
+# HemoLens — MobileNetV4-Conv-Small Edge Configuration
 # ~2.5M params → ~1 MB INT8 TFLite, <5ms on-device inference
+# UIB blocks optimized for mobile NPU/DSP (Google, 2024)
 
 # Architecture
 model:
-  backbone: "mobilenetv3_small_100"   # timm model name — 2.54M params
+  backbone: "mobilenetv4_conv_small"   # timm model name — 2.49M params
   pretrained: true
   head:
     hidden_dim: 64                    # smaller head for smaller backbone

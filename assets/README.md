@@ -6,7 +6,7 @@ Quantized TFLite models and label files for on-device inference.
 
 | File | Description | Size |
 |------|-------------|------|
-| `hemolens_model_int8.tflite` | INT8 quantized MobileNetV3-Small | ~1 MB |
+| `hemolens_model_int8.tflite` | INT8 quantized MobileNetV4-Conv-Small | ~1 MB |
 | `hemolens_model_float16.tflite` | Float16 model (higher accuracy) | ~5 MB |
 | `labels.txt` | Severity class labels for output interpretation | — |
 
