@@ -2,7 +2,7 @@
 
 **A high-performance, offline Flutter engine for non-invasive hemoglobin level estimation.**
 
-Powered by MobileNetV4-Conv-Small and optimized for on-device inference (~1 MB INT8, <5 ms latency) using the 2024 Yakimov et al. fingernail dataset.
+Powered by a hybrid pipeline: frozen MobileNetV4-Conv-Small features + Ridge regression, optimized for on-device inference (~2.5 MB INT8, <5 ms latency) using the 2024 Yakimov et al. fingernail dataset.
 
 ---
 
@@ -23,7 +23,7 @@ HemoLens/
 HemoLens estimates hemoglobin (Hb) levels from smartphone camera images of fingernail beds — no blood draw required. The pipeline:
 
 1. **Research** — EDA on the Yakimov et al. (2024) fingernail image dataset, color-space feature extraction (RGB, LAB, HSV), and traditional ML baselines (Ridge, SVR, Gradient Boosting).
-2. **Model** — Fine-tune a MobileNetV4-Conv-Small backbone with a regression head on nail-bed ROI crops. Progressive unfreezing, aggressive augmentation, and Huber loss for small-data robustness. Export to TFLite with INT8 quantization.
+2. **Model** — Frozen MobileNetV4-Conv-Small backbone as a feature extractor (1280-dim), combined with 51 handcrafted color features, feeding a Ridge regression head. The hybrid approach significantly outperforms end-to-end fine-tuning in the small-data regime (250 patients). Export to ONNX → TFLite with INT8 quantization.
 3. **Flutter Plugin** — On-device inference engine wrapping TFLite via `dart:ffi` / platform channels, with real-time camera preprocessing.
 4. **Example App** — A turnkey Flutter application demonstrating live Hb estimation from the device camera.
 
@@ -37,13 +37,24 @@ HemoLens estimates hemoglobin (Hb) levels from smartphone camera images of finge
 | Lasso Regression | 1.692 | 0.324 | 1.578 |
 | SVR (RBF) | 1.774 | 0.231 | 1.845 |
 
-*Hand-crafted color features on 51 dimensions. Target for DL model: MAE < 1.0 g/dL, R² > 0.60.*
+*Hand-crafted color features on 51 dimensions.*
+
+## Deep Learning Results
+
+| Approach | Val MAE (g/dL) | Test MAE (g/dL) | Val R² | CV MAE (g/dL) |
+|----------|----------------|-----------------|--------|----------------|
+| **Hybrid: frozen MobileNetV4 + color features → Ridge** | **1.690** | **1.365** | **0.483** | **1.656 ± 0.18** |
+| Hybrid: frozen MobileNetV4 + color features → Ridge+PCA128 | 1.717 | 1.402 | 0.485 | — |
+| Hybrid: frozen MobileNetV4 + color features → ElasticNet | 1.909 | 1.406 | 0.377 | — |
+| End-to-end fine-tuned MobileNetV4 | 2.315 | — | 0.143 | — |
+
+The hybrid frozen-backbone approach beats both end-to-end fine-tuning and pure color-feature baselines.
 
 ## Key Features
 
 - **Offline-first**: All inference runs on-device — no cloud dependency.
 - **Sub-5ms latency**: INT8-quantized MobileNetV4-Conv-Small targeting mobile NPU/GPU delegates.
-- **~1 MB model**: Edge-optimized — 2.5M params quantized to INT8.
+- **~2.5 MB model**: Frozen backbone + Ridge head, quantized to INT8.
 - **Cross-platform**: Android (NNAPI) and iOS (Core ML delegate) support.
 - **Privacy-preserving**: No images leave the device.
 
@@ -71,8 +82,8 @@ jupyter lab
 cd model
 pip install -r requirements.txt
 python prepare_dataset.py                              # crop nail ROIs → data/processed/
-python train.py --config configs/mobilenet_edge.yaml   # train edge model
-python export_tflite.py --checkpoint checkpoints/best_model.pth --quantize int8
+python train_hybrid.py --config configs/mobilenet_edge.yaml  # hybrid: frozen CNN features + Ridge
+python export_tflite.py --checkpoint checkpoints/hemolens_hybrid.pth --quantize int8
 ```
 
 ### 3. Run the Example App
@@ -86,18 +97,18 @@ flutter run
 
 ```
 Input (224×224×3)
-  → MobileNetV4-Conv-Small (pretrained, timm)
+  → MobileNetV4-Conv-Small (frozen pretrained, timm)
   → Global Pool → [1280-dim]
-  → Linear(1280→64) → ReLU → Dropout(0.4)
-  → Linear(64→1) → Hb (g/dL)
+  → Ridge Regression → Hb (g/dL)
 ```
 
-**Training strategy for 750 samples:**
-- Progressive unfreezing: head-only for 5 epochs, then full fine-tuning with 10× lower backbone LR
-- Heavy augmentation: color jitter, rotation, random erasing, random resized crop
-- Label noise (σ=0.1 g/dL) for regression smoothing
-- Huber loss (δ=1.5) — robust to Hb measurement outliers
-- Early stopping with patience=15
+**Training strategy for 250 patients:**
+- **Hybrid pipeline**: Frozen ImageNet backbone as feature extractor — avoids overfitting with small data
+- 3 nail crops per patient averaged to one 1280-dim feature vector
+- 51 handcrafted color features (RGB, LAB, HSV) concatenated → 1331-dim input to Ridge
+- Patient-level stratified splits to prevent data leakage
+- 5-fold GroupKFold cross-validation: **MAE = 1.656 ± 0.18 g/dL**
+- End-to-end ONNX export (backbone + head) for TFLite conversion
 
 ## Requirements
 

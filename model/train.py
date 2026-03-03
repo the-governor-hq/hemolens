@@ -173,9 +173,11 @@ def evaluate(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="HemoLens ViT Training")
+    parser = argparse.ArgumentParser(description="HemoLens Training")
     parser.add_argument("--config", type=str, default="configs/vit_base.yaml")
     parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Path to checkpoint to resume from (e.g. checkpoints/best_model.pth)")
     args = parser.parse_args()
 
     # Load config
@@ -275,11 +277,42 @@ def main():
     save_dir = Path(cfg["logging"]["save_dir"])
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    # Training loop
+    # Resume from checkpoint
+    start_epoch = 1
     best_mae = float("inf")
     patience_counter = 0
 
-    for epoch in range(1, train_cfg["epochs"] + 1):
+    if args.resume:
+        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt["model_state_dict"])
+        start_epoch = ckpt["epoch"] + 1
+        best_mae = ckpt.get("val_mae", float("inf"))
+        patience_counter = ckpt.get("patience_counter", 0)
+
+        # If resuming past freeze phase, unfreeze and rebuild 2-group optimizer
+        if freeze_epochs > 0 and start_epoch > freeze_epochs:
+            model.unfreeze_backbone()
+            unfreeze_factor = train_cfg.get("unfreeze_lr_factor", 0.1)
+            optimizer = AdamW([
+                {"params": model.backbone.parameters(), "lr": train_cfg["learning_rate"] * unfreeze_factor},
+                {"params": model.head.parameters(), "lr": train_cfg["learning_rate"]},
+            ], weight_decay=train_cfg["weight_decay"])
+            remaining = train_cfg["epochs"] - start_epoch + 1
+            scheduler = CosineAnnealingLR(optimizer, T_max=remaining)
+
+        # Restore optimizer & scheduler state (param group counts now match)
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        if "scheduler_state_dict" in ckpt:
+            try:
+                scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+            except Exception:
+                pass  # scheduler structure may differ, continue with fresh one
+
+        print(f"\nResumed from {args.resume} (epoch {ckpt['epoch']}, MAE={best_mae:.3f})")
+        print(f"Continuing from epoch {start_epoch}...\n")
+
+    # Training loop
+    for epoch in range(start_epoch, train_cfg["epochs"] + 1):
         # Progressive unfreezing
         if freeze_epochs > 0 and epoch == freeze_epochs + 1:
             model.unfreeze_backbone()
@@ -324,7 +357,9 @@ def main():
                     "epoch": epoch,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
                     "val_mae": best_mae,
+                    "patience_counter": patience_counter,
                     "config": cfg,
                 },
                 ckpt_path,
