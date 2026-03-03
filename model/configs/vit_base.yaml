@@ -1,0 +1,61 @@
+# HemoLens ViT training configuration
+# Architecture
+model:
+  backbone: "vit_small_patch16_224"  # timm model name
+  pretrained: true
+  head:
+    hidden_dim: 128
+    dropout: 0.3
+  input_size: 224
+
+# Dataset
+data:
+  root: "../data/processed"
+  metadata_csv: "../data/processed/metadata_splits.csv"
+  test_size: 0.15
+  val_size: 0.15
+  random_state: 42
+
+# Augmentation
+augmentation:
+  train:
+    random_crop: 224
+    horizontal_flip: 0.5
+    color_jitter:
+      brightness: 0.2
+      contrast: 0.2
+      saturation: 0.15
+      hue: 0.05
+    random_rotation: 15
+    normalize:
+      mean: [0.485, 0.456, 0.406]
+      std: [0.229, 0.224, 0.225]
+  val:
+    resize: 256
+    center_crop: 224
+    normalize:
+      mean: [0.485, 0.456, 0.406]
+      std: [0.229, 0.224, 0.225]
+
+# Training
+training:
+  epochs: 50
+  batch_size: 32
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+  scheduler: "cosine"
+  warmup_epochs: 5
+  early_stopping_patience: 10
+  gradient_clip_norm: 1.0
+
+# Loss
+loss:
+  type: "huber"     # smooth L1 — robust to outliers
+  delta: 1.0
+
+# Logging
+logging:
+  save_dir: "checkpoints"
+  log_interval: 10   # steps
+  use_wandb: false
+  project_name: "hemolens"

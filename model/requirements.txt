@@ -1,0 +1,15 @@
+# Model training dependencies
+torch>=2.2
+torchvision>=0.17
+timm>=0.9.12
+onnx>=1.15
+onnxruntime>=1.17
+tensorflow>=2.16       # for TFLite converter
+numpy>=1.26
+pandas>=2.1
+Pillow>=10.2
+opencv-python>=4.9
+scikit-learn>=1.4
+pyyaml>=6.0
+tqdm>=4.66
+wandb>=0.16            # optional: experiment tracking

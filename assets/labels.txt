@@ -1,0 +1,8 @@
+# HemoLens severity labels (WHO classification)
+# Format: threshold_low,threshold_high,label
+0.0,7.0,severe_anemia
+7.0,10.0,moderate_anemia
+10.0,12.0,mild_anemia_female
+10.0,13.0,mild_anemia_male
+12.0,20.0,normal_female
+13.0,20.0,normal_male

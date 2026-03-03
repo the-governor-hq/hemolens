@@ -1,0 +1,2 @@
+Placeholder — this file will be replaced by the quantized TFLite model
+after running: python model/export_tflite.py --quantize int8

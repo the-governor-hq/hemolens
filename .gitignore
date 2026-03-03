@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# PyTorch
+*.pth
+*.pt
+checkpoints/
+runs/
+wandb/
+
+# TFLite (keep quantized models in assets/)
+*.tflite
+!assets/*.tflite
+
+# Flutter / Dart
+.dart_tool/
+.packages
+.pub-cache/
+.pub/
+build/
+*.iml
+*.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Data (large files — use DVC or Git LFS)
+data/raw/
+data/processed/
+*.csv
+*.parquet
+!research/metadata/*.csv
