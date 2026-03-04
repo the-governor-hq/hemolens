@@ -1,0 +1,20 @@
+
+============================================================
+Training on CROP LEVEL (CNN-only): 525 crops, 1280 features
+============================================================
+
+--- Ridge ---
+  Val MAE (patient):  1.740 g/dL
+  Test MAE (patient): 1.422 g/dL | RMSE: 1.783 | R2: 0.053
+
+--- CatBoost ---
+  Val MAE (patient):  1.783 g/dL
+  Test MAE (patient): 1.359 g/dL | RMSE: 1.784 | R2: 0.052
+
+--- XGBoost ---
+  Val MAE (patient):  1.798 g/dL
+  Test MAE (patient): 1.366 g/dL | RMSE: 1.757 | R2: 0.081
+
+--- LightGBM ---
+  Val MAE (patient):  1.769 g/dL
+  Test MAE (patient): 1.351 g/dL | RMSE: 1.778 | R2: 0.059
