@@ -2,14 +2,14 @@
 HemoLens — Hybrid Feature Extraction + Regression
 
 Strategy:
-  1. Frozen MobileNetV4-Conv-Small backbone → 1280-dim CNN features per crop
-  2. Average 3 crops per patient → 1280-dim patient vector
-  3. Concatenate with 51 handcrafted color features → 1331-dim
-  4. Train Ridge / ElasticNet / small MLP with patient-level CV
-  5. Export end-to-end model (backbone + head) for TFLite
+  1. Frozen backbone (e.g. MobileNetV4-Conv-Small) → CNN features per crop
+  2. Average crops per patient → patient-level CNN vector
+  3. Optionally concatenate with handcrafted color features
+  4. Train Ridge / ElasticNet / PCA+Ridge with session-aware CV
+  5. Export CNN-only head for TFLite (color features are not available on-device)
 
-Why: With only 250 patients, fine-tuning 2.5M params overfits.
-     Frozen ImageNet features + classical head is the proven small-data approach.
+Why: With only ~250 patients, fine-tuning millions of params overfits.
+     Frozen ImageNet features + classical head is a proven small-data approach.
 
 Usage:
     python train_hybrid.py --config configs/mobilenet_edge.yaml
@@ -30,7 +30,6 @@ from sklearn.decomposition import PCA
 from sklearn.linear_model import ElasticNetCV, RidgeCV
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import GroupKFold
-from sklearn.neural_network import MLPRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
@@ -40,9 +39,44 @@ try:
 except ImportError:
     raise ImportError("Install timm: pip install timm")
 
+try:
+    from catboost import CatBoostRegressor
+    HAS_CATBOOST = True
+except ImportError:
+    HAS_CATBOOST = False
+
 from transforms import get_val_transforms
 
 warnings.filterwarnings("ignore", category=UserWarning)
+
+
+# ---------------------------------------------------------------------------
+# WHO anemia severity thresholds (g/dL)
+# ---------------------------------------------------------------------------
+
+# WHO Hb thresholds for adults — sex-specific in full guidelines.
+# Using general-population cutoffs for screening context.
+# Ref: WHO/NMH/NHD/MNM/11.1 (2011)
+_WHO_BINS = [
+    ("Severe",   0.0,  8.0),   # <8 g/dL
+    ("Moderate", 8.0, 11.0),   # 8–10.9
+    ("Mild",    11.0, 13.0),   # 11–12.9
+    ("Normal",  13.0, 99.0),   # ≥13
+]
+
+
+def _severity_breakdown(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
+    """Per-WHO-class MAE breakdown."""
+    report = {}
+    for label, lo, hi in _WHO_BINS:
+        mask = (y_true >= lo) & (y_true < hi)
+        n = int(mask.sum())
+        if n > 0:
+            mae = float(mean_absolute_error(y_true[mask], y_pred[mask]))
+        else:
+            mae = float("nan")
+        report[label] = {"n": n, "mae": mae}
+    return report
 
 
 # ---------------------------------------------------------------------------
@@ -56,18 +90,23 @@ def extract_cnn_features(
     input_size: int,
     val_cfg: dict,
     device: torch.device,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    tta: bool = True,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Extract features from a frozen pretrained backbone for all crops.
+
+    When tta=True, averages features from original + horizontally-flipped image
+    (test-time augmentation) for more robust embeddings.
 
     Returns:
         features: (N_crops, embed_dim) — CNN features per crop
         hb_values: (N_crops,) — Hb labels
         patient_ids: (N_crops,) — patient IDs for grouping
         splits: (N_crops,) — split labels
+        sessions: (N_crops,) — session IDs for leakage-aware grouping
     """
     print(f"\n{'='*60}")
-    print(f"Extracting frozen {backbone_name} features")
+    print(f"Extracting frozen {backbone_name} features {'(TTA)' if tta else ''}")
     print(f"{'='*60}")
 
     # Load backbone in eval mode — no gradients
@@ -86,6 +125,7 @@ def extract_cnn_features(
     hb_list = []
     pid_list = []
     split_list = []
+    session_list = []
 
     with torch.no_grad():
         for _, row in tqdm(df.iterrows(), total=len(df), desc="Extracting features"):
@@ -94,18 +134,28 @@ def extract_cnn_features(
             tensor = tf(img).unsqueeze(0).to(device)
 
             feat = backbone(tensor).squeeze(0).cpu().numpy()
+
+            # TTA: average with horizontally-flipped version
+            if tta:
+                flipped = img.transpose(Image.FLIP_LEFT_RIGHT)
+                tensor_flip = tf(flipped).unsqueeze(0).to(device)
+                feat_flip = backbone(tensor_flip).squeeze(0).cpu().numpy()
+                feat = (feat + feat_flip) / 2.0
+
             features_list.append(feat)
             hb_list.append(row["hb_value"])
             pid_list.append(row["patient_id"])
             split_list.append(row["split"])
+            session_list.append(row.get("session", row["patient_id"]))  # fallback to pid if no session col
 
     features = np.stack(features_list)
     hb_values = np.array(hb_list, dtype=np.float32)
     patient_ids = np.array(pid_list)
     splits = np.array(split_list)
+    sessions = np.array(session_list)
 
     print(f"CNN features shape: {features.shape}")
-    return features, hb_values, patient_ids, splits
+    return features, hb_values, patient_ids, splits, sessions
 
 
 # ---------------------------------------------------------------------------
@@ -117,12 +167,13 @@ def build_patient_features(
     hb_values: np.ndarray,
     patient_ids: np.ndarray,
     splits: np.ndarray,
+    sessions: np.ndarray | None = None,
     color_features_csv: Path | None = None,
 ) -> dict:
     """
     Average CNN features across 3 crops per patient, optionally merge with color features.
 
-    Returns dict with train/val/test splits.
+    Returns dict with train/val/test splits (including session IDs for CV grouping).
     """
     unique_pids = np.unique(patient_ids)
     print(f"\nAggregating {len(cnn_features)} crops → {len(unique_pids)} patients")
@@ -131,11 +182,14 @@ def build_patient_features(
     patient_cnn = {}
     patient_hb = {}
     patient_split = {}
+    patient_session = {}
     for pid in unique_pids:
         mask = patient_ids == pid
         patient_cnn[pid] = cnn_features[mask].mean(axis=0)
         patient_hb[pid] = hb_values[mask][0]  # same for all crops
         patient_split[pid] = splits[mask][0]
+        if sessions is not None:
+            patient_session[pid] = sessions[mask][0]
 
     # Stack into arrays (ordered by pid)
     ordered_pids = sorted(unique_pids)
@@ -143,6 +197,10 @@ def build_patient_features(
     y = np.array([patient_hb[p] for p in ordered_pids])
     split_arr = np.array([patient_split[p] for p in ordered_pids])
     pid_arr = np.array(ordered_pids)
+    if patient_session:
+        session_arr = np.array([patient_session[p] for p in ordered_pids])
+    else:
+        session_arr = pid_arr  # fallback
 
     print(f"  CNN features: {X_cnn.shape}")
 
@@ -154,7 +212,7 @@ def build_patient_features(
 
         # Get only the actual feature columns (exclude ID, label columns)
         feat_cols = [c for c in color_df.columns if c not in ("PATIENT_ID", "hb_gdL", "HB_LEVEL_GperL")]
-        color_mat = color_df[feat_cols].values  # (250, 51)
+        color_mat = color_df[feat_cols].values
 
         # Align by patient ID
         color_pid_order = color_df["PATIENT_ID"].values
@@ -177,6 +235,7 @@ def build_patient_features(
                 "X": X[mask],
                 "y": y[mask],
                 "pids": pid_arr[mask],
+                "sessions": session_arr[mask],
             }
             print(f"  {split_name}: {mask.sum()} patients")
 
@@ -218,35 +277,24 @@ def train_and_evaluate(data: dict) -> dict:
             ("pca", PCA(n_components=128)),
             ("model", RidgeCV(alphas=np.logspace(-3, 5, 50), cv=5)),
         ]),
-        "MLP_small": Pipeline([
+        "Ridge+PCA64": Pipeline([
             ("scaler", StandardScaler()),
-            ("model", MLPRegressor(
-                hidden_layer_sizes=(64, 32),
-                activation="relu",
-                solver="adam",
-                alpha=1e-2,
-                learning_rate="adaptive",
-                max_iter=1000,
-                early_stopping=True,
-                validation_fraction=0.15,
-                random_state=42,
-            )),
+            ("pca", PCA(n_components=64)),
+            ("model", RidgeCV(alphas=np.logspace(-3, 5, 50), cv=5)),
         ]),
-        "MLP_tiny": Pipeline([
+        "Ridge+PCA32": Pipeline([
             ("scaler", StandardScaler()),
-            ("model", MLPRegressor(
-                hidden_layer_sizes=(32,),
-                activation="relu",
-                solver="adam",
-                alpha=1e-2,
-                learning_rate="adaptive",
-                max_iter=1000,
-                early_stopping=True,
-                validation_fraction=0.15,
-                random_state=42,
-            )),
+            ("pca", PCA(n_components=32)),
+            ("model", RidgeCV(alphas=np.logspace(-3, 5, 50), cv=5)),
         ]),
     }
+
+    # CatBoost is strong on small tabular data — add if available
+    if HAS_CATBOOST:
+        models["CatBoost"] = CatBoostRegressor(
+            iterations=500, depth=4, learning_rate=0.03,
+            l2_leaf_reg=10, random_seed=42, verbose=0,
+        )
 
     results = {}
     best_mae = float("inf")
@@ -255,16 +303,21 @@ def train_and_evaluate(data: dict) -> dict:
 
     for name, pipeline in models.items():
         print(f"\n--- {name} ---")
-        pipeline.fit(X_train, y_train)
+        # CatBoost is not a Pipeline — handle separately
+        if HAS_CATBOOST and isinstance(pipeline, CatBoostRegressor):
+            pipeline.fit(X_train, y_train)
+            val_pred = pipeline.predict(X_val)
+            test_pred = pipeline.predict(X_test)
+        else:
+            pipeline.fit(X_train, y_train)
+            val_pred = pipeline.predict(X_val)
+            test_pred = pipeline.predict(X_test)
 
-        # Validate
-        val_pred = pipeline.predict(X_val)
+        # Metrics
         val_mae = mean_absolute_error(y_val, val_pred)
         val_rmse = np.sqrt(mean_squared_error(y_val, val_pred))
         val_r2 = r2_score(y_val, val_pred)
 
-        # Test
-        test_pred = pipeline.predict(X_test)
         test_mae = mean_absolute_error(y_test, test_pred)
         test_rmse = np.sqrt(mean_squared_error(y_test, test_pred))
         test_r2 = r2_score(y_test, test_pred)
@@ -272,9 +325,15 @@ def train_and_evaluate(data: dict) -> dict:
         print(f"  Val:  MAE={val_mae:.3f} | RMSE={val_rmse:.3f} | R²={val_r2:.4f}")
         print(f"  Test: MAE={test_mae:.3f} | RMSE={test_rmse:.3f} | R²={test_r2:.4f}")
 
+        # Per-severity-class breakdown (WHO anemia thresholds)
+        severity = _severity_breakdown(y_test, test_pred)
+        for cls, m in severity.items():
+            print(f"    {cls:8s}: n={m['n']:3d}, MAE={m['mae']:.3f}")
+
         results[name] = {
             "val_mae": float(val_mae), "val_rmse": float(val_rmse), "val_r2": float(val_r2),
             "test_mae": float(test_mae), "test_rmse": float(test_rmse), "test_r2": float(test_r2),
+            "severity": severity,
         }
 
         if val_mae < best_mae:
@@ -295,22 +354,27 @@ def train_and_evaluate(data: dict) -> dict:
 
 def cross_validate_best(data: dict, n_splits: int = 5) -> dict:
     """
-    Patient-level GroupKFold CV on train+val combined for robust MAE estimate.
+    Session-aware GroupKFold CV on train+val combined for robust MAE estimate.
+    Groups by session (MEASUREMENT_DATE) to prevent data leakage in CV folds.
     """
     # Combine train + val for CV
     X = np.vstack([data["train"]["X"], data["val"]["X"]])
     y = np.concatenate([data["train"]["y"], data["val"]["y"]])
-    pids = np.concatenate([data["train"]["pids"], data["val"]["pids"]])
+    sessions = np.concatenate([data["train"]["sessions"], data["val"]["sessions"]])
+
+    n_groups = len(np.unique(sessions))
+    effective_splits = min(n_splits, n_groups)
 
     print(f"\n{'='*60}")
-    print(f"5-Fold Patient-Level Cross-Validation ({len(pids)} patients)")
+    print(f"{effective_splits}-Fold Session-Aware Cross-Validation "
+          f"({len(sessions)} patients, {n_groups} session groups)")
     print(f"{'='*60}")
 
-    gkf = GroupKFold(n_splits=n_splits)
+    gkf = GroupKFold(n_splits=effective_splits)
     fold_maes = []
     fold_r2s = []
 
-    for fold, (train_idx, val_idx) in enumerate(gkf.split(X, y, groups=pids), 1):
+    for fold, (train_idx, val_idx) in enumerate(gkf.split(X, y, groups=sessions), 1):
         X_tr, X_vl = X[train_idx], X[val_idx]
         y_tr, y_vl = y[train_idx], y[val_idx]
 
@@ -451,7 +515,7 @@ def main():
     color_csv = Path(args.color_features) if not args.no_color else None
 
     # Step 1: Extract frozen CNN features
-    cnn_features, hb_values, patient_ids, splits = extract_cnn_features(
+    cnn_features, hb_values, patient_ids, splits, sessions = extract_cnn_features(
         backbone_name=cfg["model"]["backbone"],
         data_root=data_root,
         metadata_csv=metadata_csv,
@@ -464,6 +528,7 @@ def main():
     # Step 2: Aggregate to patient level + merge color features
     data = build_patient_features(
         cnn_features, hb_values, patient_ids, splits,
+        sessions=sessions,
         color_features_csv=color_csv,
     )
 
@@ -484,33 +549,38 @@ def main():
     print(f"\nResults saved → {results_path}")
 
     # Step 5: Export for TFLite (CNN-only head for edge)
-    if not args.no_export and "Ridge" in best_name and "PCA" not in best_name:
-        export_pytorch_model(
-            cfg["model"]["backbone"],
-            best_model,
-            cnn_dim,
-            save_dir,
-        )
-    elif not args.no_export:
-        print(f"\nNote: ONNX export only supported for Ridge (no PCA). Best was '{best_name}'.")
-        # Train a pure Ridge on CNN-only features for export
-        print("Training Ridge on CNN-only features for edge export...")
+    # IMPORTANT: The exported edge model uses ONLY CNN features — color features
+    # are not available on-device. We must train and evaluate a CNN-only Ridge
+    # so the reported accuracy matches what the deployed model actually achieves.
+    if not args.no_export:
+        print(f"\n{'='*60}")
+        print("Training CNN-only Ridge for edge export")
+        print("(color features not available on-device)")
+        print(f"{'='*60}")
+
         cnn_data = build_patient_features(
             cnn_features, hb_values, patient_ids, splits,
-            color_features_csv=None,
+            sessions=sessions,
+            color_features_csv=None,  # CNN-only
         )
         export_pipe = Pipeline([
             ("scaler", StandardScaler()),
             ("model", RidgeCV(alphas=np.logspace(-3, 5, 50), cv=5)),
         ])
-        X_tr = np.vstack([cnn_data["train"]["X"], cnn_data["val"]["X"]])
-        y_tr = np.concatenate([cnn_data["train"]["y"], cnn_data["val"]["y"]])
-        export_pipe.fit(X_tr, y_tr)
+        export_pipe.fit(cnn_data["train"]["X"], cnn_data["train"]["y"])
 
-        # Evaluate on test
-        test_pred = export_pipe.predict(cnn_data["test"]["X"])
-        test_mae = mean_absolute_error(cnn_data["test"]["y"], test_pred)
-        print(f"  CNN-only Ridge test MAE: {test_mae:.3f}")
+        # Report CNN-only accuracy (this is what the deployed model will achieve)
+        for split_name in ["val", "test"]:
+            if split_name in cnn_data:
+                pred = export_pipe.predict(cnn_data[split_name]["X"])
+                s_mae = mean_absolute_error(cnn_data[split_name]["y"], pred)
+                s_r2 = r2_score(cnn_data[split_name]["y"], pred)
+                print(f"  Edge model {split_name}: MAE={s_mae:.3f}, R²={s_r2:.4f}")
+
+        all_results["edge_model"] = {
+            "type": "Ridge_CNN_only",
+            "note": "This is the accuracy of the actually deployed model (no color features)",
+        }
 
         export_pytorch_model(
             cfg["model"]["backbone"],

@@ -20,7 +20,7 @@ import torch.nn as nn
 import yaml
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 
 try:
@@ -30,6 +30,24 @@ except ImportError:
 
 from dataset import FingernailHbDataset
 from transforms import get_train_transforms, get_val_transforms
+
+
+# ---------------------------------------------------------------------------
+# Sample weighting — upweight clinically critical severe/moderate anemia
+# ---------------------------------------------------------------------------
+
+def compute_sample_weights(hb_values: np.ndarray) -> np.ndarray:
+    """
+    Inverse-frequency weights per anemia severity bin.
+    Upweights rare severe/moderate cases so each severity bin
+    contributes equally to the expected loss per epoch.
+    """
+    bins = np.digitize(hb_values, bins=[8.0, 11.0, 13.0])  # 0=severe, 1=mod, 2=mild, 3=normal
+    unique, counts = np.unique(bins, return_counts=True)
+    freq = {u: c for u, c in zip(unique, counts)}
+    total = len(hb_values)
+    weights = np.array([total / (len(freq) * freq[b]) for b in bins], dtype=np.float64)
+    return weights
 
 
 # ---------------------------------------------------------------------------
@@ -159,11 +177,22 @@ def evaluate(
     ss_tot = np.sum((targets - targets.mean()) ** 2)
     r2 = 1 - (ss_res / (ss_tot + 1e-8))
 
+    # Per-severity breakdown (general-population thresholds, WHO 2011)
+    severity = {}
+    for label, lo, hi in [("Severe", 0, 8), ("Moderate", 8, 11), ("Mild", 11, 13), ("Normal", 13, 99)]:
+        mask = (targets >= lo) & (targets < hi)
+        n = int(mask.sum())
+        severity[label] = {
+            "n": n,
+            "mae": float(np.mean(np.abs(preds[mask] - targets[mask]))) if n > 0 else float("nan"),
+        }
+
     return {
         "loss": total_loss / max(n_batches, 1),
         "mae": mae,
         "rmse": rmse,
         "r2": r2,
+        "severity": severity,
     }
 
 
@@ -204,10 +233,24 @@ def main():
     use_cuda = device.type == "cuda"
     num_workers = 4 if use_cuda else 0
 
+    # Weighted sampling: upweight severe/moderate anemia cases
+    use_weighted = train_cfg.get("weighted_sampling", True)
+    if use_weighted:
+        sample_weights = compute_sample_weights(train_ds.hb_values)
+        sampler = WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=len(train_ds),
+            replacement=True,
+        )
+        print(f"Weighted sampling enabled (bins: severe/mod/mild/normal)")
+    else:
+        sampler = None
+
     train_loader = DataLoader(
         train_ds,
         batch_size=train_cfg["batch_size"],
-        shuffle=True,
+        shuffle=(sampler is None),  # mutually exclusive with sampler
+        sampler=sampler,
         num_workers=num_workers,
         pin_memory=use_cuda,
     )
@@ -346,6 +389,10 @@ def main():
             f"RMSE: {val_metrics['rmse']:.3f} | "
             f"R²: {val_metrics['r2']:.4f}"
         )
+        # Show per-severity breakdown
+        for cls, m in val_metrics["severity"].items():
+            if m["n"] > 0:
+                print(f"  {cls:8s}: n={m['n']:3d}, MAE={m['mae']:.3f}")
 
         # Checkpointing
         if val_metrics["mae"] < best_mae:

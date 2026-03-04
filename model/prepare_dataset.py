@@ -19,7 +19,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GroupShuffleSplit
 
 # ---------------------------------------------------------------------------
 # Config
@@ -85,6 +85,7 @@ def prepare(val_size: float = 0.15, test_size: float = 0.15):
                 "hb_value": row["hb_gdL"],
                 "hb_gperL": row["HB_LEVEL_GperL"],
                 "nail_index": j,
+                "session": row["MEASUREMENT_DATE"],
             })
 
     crop_df = pd.DataFrame(records)
@@ -93,42 +94,52 @@ def prepare(val_size: float = 0.15, test_size: float = 0.15):
         print(f"  (skipped {skipped} missing/unreadable images)")
 
     # ------------------------------------------------------------------
-    # 2. Patient-level stratified splits (prevent data leakage)
+    # 2. Session-aware patient-level splits (prevent data leakage)
+    #    Patients from the same MEASUREMENT_DATE share lighting/camera
+    #    conditions — they MUST stay in the same split.
     # ------------------------------------------------------------------
-    patients = crop_df[["patient_id", "hb_value"]].drop_duplicates()
+    patients = crop_df[["patient_id", "hb_value", "session"]].drop_duplicates(subset="patient_id")
 
-    # Bin Hb for stratification (quartile-based)
-    patients["hb_bin"] = pd.qcut(patients["hb_value"], q=4, labels=False, duplicates="drop")
+    # Use MEASUREMENT_DATE as the group key so same-session patients
+    # never leak across train/val/test boundaries.
+    groups = patients["session"].values
 
     # First split: train vs (val+test)
     holdout_size = val_size + test_size
-    train_pids, holdout_pids = train_test_split(
-        patients["patient_id"],
-        test_size=holdout_size,
-        random_state=RANDOM_STATE,
-        stratify=patients["hb_bin"],
-    )
+    gss1 = GroupShuffleSplit(n_splits=1, test_size=holdout_size, random_state=RANDOM_STATE)
+    train_idx, holdout_idx = next(gss1.split(patients, groups=groups))
+    train_pids = patients.iloc[train_idx]["patient_id"]
+    holdout_patients = patients.iloc[holdout_idx]
 
     # Second split: val vs test
-    holdout_patients = patients[patients["patient_id"].isin(holdout_pids)]
+    holdout_groups = holdout_patients["session"].values
     relative_test = test_size / holdout_size
-    val_pids, test_pids = train_test_split(
-        holdout_patients["patient_id"],
-        test_size=relative_test,
-        random_state=RANDOM_STATE,
-        stratify=holdout_patients["hb_bin"],
-    )
+    gss2 = GroupShuffleSplit(n_splits=1, test_size=relative_test, random_state=RANDOM_STATE)
+    val_idx, test_idx = next(gss2.split(holdout_patients, groups=holdout_groups))
+    val_pids = holdout_patients.iloc[val_idx]["patient_id"]
+    test_pids = holdout_patients.iloc[test_idx]["patient_id"]
 
     # Assign splits
+    train_set, val_set, test_set = set(train_pids), set(val_pids), set(test_pids)
     def assign_split(pid):
-        if pid in set(train_pids):
+        if pid in train_set:
             return "train"
-        elif pid in set(val_pids):
+        elif pid in val_set:
             return "val"
         else:
             return "test"
 
     crop_df["split"] = crop_df["patient_id"].apply(assign_split)
+
+    # Verify no session leaks across splits
+    for s1, s2 in [("train", "val"), ("train", "test"), ("val", "test")]:
+        sessions_1 = set(crop_df[crop_df["split"] == s1]["session"])
+        sessions_2 = set(crop_df[crop_df["split"] == s2]["session"])
+        leaked = sessions_1 & sessions_2
+        if leaked:
+            print(f"  WARNING: {len(leaked)} sessions leak between {s1} and {s2}!")
+        else:
+            print(f"  ✓ No session leakage between {s1}/{s2}")
 
     # ------------------------------------------------------------------
     # 3. Save metadata CSV
@@ -137,7 +148,8 @@ def prepare(val_size: float = 0.15, test_size: float = 0.15):
     crop_df.to_csv(output_csv, index=False)
 
     # Summary
-    print(f"\nSplit summary (patient-level, stratified):")
+    n_sessions = crop_df["session"].nunique()
+    print(f"\nSplit summary (session-aware, {n_sessions} unique sessions):")
     for split in ["train", "val", "test"]:
         subset = crop_df[crop_df["split"] == split]
         n_patients = subset["patient_id"].nunique()
