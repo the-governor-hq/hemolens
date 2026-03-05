@@ -52,48 +52,130 @@
         <video id="video" autoplay playsinline muted></video>
         <canvas id="captureCanvas" class="capture-canvas"></canvas>
 
-        <!-- SVG Finger Guide Overlay -->
-        <svg id="guideOverlay" class="guide-overlay" viewBox="0 0 400 400" preserveAspectRatio="xMidYMid meet">
-          <!-- Dim everything outside the nail zone -->
+        <!-- SVG Finger Guide Overlay — anatomical silhouette -->
+        <svg id="guideOverlay" class="guide-overlay" viewBox="0 0 400 500" preserveAspectRatio="xMidYMid meet">
           <defs>
+            <!-- Gradient for the pulsing nail zone border -->
+            <linearGradient id="nailGlow" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#f87171"/>
+              <stop offset="100%" stop-color="#ef4444"/>
+            </linearGradient>
+
+            <!-- Mask to dim everything except the nail capture zone -->
             <mask id="cutout">
-              <rect width="400" height="400" fill="white"/>
-              <rect x="120" y="130" width="160" height="120" rx="24" ry="24" fill="black"/>
+              <rect width="400" height="500" fill="white"/>
+              <rect x="130" y="115" width="140" height="105" rx="22" ry="22" fill="black"/>
             </mask>
+
+            <!-- Subtle drop shadow for finger silhouette -->
+            <filter id="fingerShadow" x="-10%" y="-10%" width="120%" height="120%">
+              <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#000" flood-opacity="0.35"/>
+            </filter>
           </defs>
-          <rect width="400" height="400" fill="rgba(0,0,0,0.45)" mask="url(#cutout)"/>
 
-          <!-- Nail outline guide -->
-          <rect x="120" y="130" width="160" height="120" rx="24" ry="24"
-                fill="none" stroke="rgba(255,255,255,0.85)" stroke-width="2.5" stroke-dasharray="8 4"/>
+          <!-- Dim vignette outside the nail zone -->
+          <rect width="400" height="500" fill="rgba(0,0,0,0.50)" mask="url(#cutout)"/>
 
-          <!-- Corner brackets -->
-          <path d="M130 145 L130 138 Q130 130 138 130 L148 130" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
-          <path d="M270 145 L270 138 Q270 130 262 130 L252 130" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
-          <path d="M130 235 L130 242 Q130 250 138 250 L148 250" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
-          <path d="M270 235 L270 242 Q270 250 262 250 L252 250" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
+          <!-- ── Finger silhouette (index finger, dorsal view) ── -->
+          <g filter="url(#fingerShadow)" opacity="0.35">
+            <!-- Finger body extending below the nail -->
+            <path d="
+              M168 220
+              C168 220, 165 260, 164 300
+              C162 340, 158 380, 155 410
+              L245 410
+              C242 380, 238 340, 236 300
+              C235 260, 232 220, 232 220
+            " fill="rgba(255,255,255,0.12)" stroke="rgba(255,255,255,0.18)" stroke-width="1"/>
 
-          <!-- Fingertip silhouette hint -->
-          <path d="M200 280 C160 280, 140 260, 140 250 L140 250 L260 250 C260 260, 240 280, 200 280Z"
-                fill="rgba(255,255,255,0.08)" stroke="rgba(255,255,255,0.2)" stroke-width="1"/>
+            <!-- Rounded fingertip above nail -->
+            <path d="
+              M168 220
+              L168 175
+              C168 140, 178 115, 200 110
+              C222 115, 232 140, 232 175
+              L232 220
+            " fill="rgba(255,255,255,0.12)" stroke="rgba(255,255,255,0.18)" stroke-width="1"/>
+          </g>
 
-          <!-- Label -->
-          <text x="200" y="118" text-anchor="middle" fill="rgba(255,255,255,0.9)"
-                font-size="13" font-family="Inter, sans-serif" font-weight="500">
-            Place fingernail here
+          <!-- ── Nail bed region (the capture zone) ── -->
+          <!-- Nail fill (translucent) -->
+          <rect x="130" y="115" width="140" height="105" rx="22" ry="22"
+                fill="rgba(248,113,113,0.06)"/>
+
+          <!-- Nail outline — animated dash -->
+          <rect x="130" y="115" width="140" height="105" rx="22" ry="22"
+                fill="none" stroke="url(#nailGlow)" stroke-width="2.5"
+                stroke-dasharray="10 5" class="nail-dash"/>
+
+          <!-- Corner brackets for alignment -->
+          <path d="M142 130 L142 123 Q142 115 150 115 L158 115" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/>
+          <path d="M258 130 L258 123 Q258 115 250 115 L242 115" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/>
+          <path d="M142 205 L142 212 Q142 220 150 220 L158 220" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/>
+          <path d="M258 205 L258 212 Q258 220 250 220 L242 220" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/>
+
+          <!-- Lunula hint (half-moon at nail base) -->
+          <ellipse cx="200" cy="210" rx="32" ry="10"
+                   fill="rgba(255,255,255,0.06)" stroke="rgba(255,255,255,0.12)" stroke-width="0.8"/>
+
+          <!-- ── Label: top instruction ── -->
+          <text x="200" y="90" text-anchor="middle" fill="rgba(255,255,255,0.92)"
+                font-size="14" font-family="Inter, sans-serif" font-weight="600"
+                letter-spacing="0.02em">
+            Align your fingernail
           </text>
-          <text x="200" y="290" text-anchor="middle" fill="rgba(255,255,255,0.5)"
-                font-size="11" font-family="Inter, sans-serif" font-weight="400">
-            Hold still · Good lighting · No nail polish
-          </text>
+
+          <!-- ── Arrows pointing inward to the nail zone ── -->
+          <!-- Left arrow -->
+          <line x1="105" y1="167" x2="125" y2="167"
+                stroke="rgba(255,255,255,0.45)" stroke-width="1.5" stroke-linecap="round"/>
+          <polyline points="120,162 127,167 120,172"
+                    fill="none" stroke="rgba(255,255,255,0.45)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <!-- Right arrow -->
+          <line x1="295" y1="167" x2="275" y2="167"
+                stroke="rgba(255,255,255,0.45)" stroke-width="1.5" stroke-linecap="round"/>
+          <polyline points="280,162 273,167 280,172"
+                    fill="none" stroke="rgba(255,255,255,0.45)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+
+          <!-- ── Tips row ── -->
+          <g class="guide-tips" opacity="0.7">
+            <!-- Icon: steady hand -->
+            <circle cx="145" cy="440" r="10" fill="none" stroke="rgba(255,255,255,0.5)" stroke-width="1"/>
+            <text x="145" y="444" text-anchor="middle" fill="rgba(255,255,255,0.55)" font-size="10">&#9995;</text>
+            <text x="145" y="462" text-anchor="middle" fill="rgba(255,255,255,0.55)"
+                  font-size="9" font-family="Inter, sans-serif">Hold still</text>
+
+            <!-- Icon: light -->
+            <circle cx="200" cy="440" r="10" fill="none" stroke="rgba(255,255,255,0.5)" stroke-width="1"/>
+            <text x="200" y="444" text-anchor="middle" fill="rgba(255,255,255,0.55)" font-size="10">&#9728;</text>
+            <text x="200" y="462" text-anchor="middle" fill="rgba(255,255,255,0.55)"
+                  font-size="9" font-family="Inter, sans-serif">Good light</text>
+
+            <!-- Icon: no polish -->
+            <circle cx="255" cy="440" r="10" fill="none" stroke="rgba(255,255,255,0.5)" stroke-width="1"/>
+            <text x="255" y="444" text-anchor="middle" fill="rgba(255,255,255,0.55)" font-size="10">&#128133;</text>
+            <text x="255" y="462" text-anchor="middle" fill="rgba(255,255,255,0.55)"
+                  font-size="9" font-family="Inter, sans-serif">No polish</text>
+          </g>
         </svg>
 
         <!-- Scanning animation (shown during inference) -->
         <div id="scanLine" class="scan-line hidden"></div>
       </div>
 
+      <!-- Instruction chip (above controls) -->
+      <div class="instruction-chip">
+        <span class="chip-dot"></span>
+        Place one fingernail inside the frame &mdash; fill the box as much as possible
+      </div>
+
       <!-- Camera controls -->
       <div class="camera-controls">
+        <button id="flashBtn" class="ctrl-btn" title="Toggle flash" aria-label="Toggle flash">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+          </svg>
+        </button>
         <button id="switchBtn" class="ctrl-btn" title="Switch camera" aria-label="Switch camera">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M23 4v6h-6"/><path d="M1 20v-6h6"/>

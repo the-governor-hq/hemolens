@@ -38,6 +38,7 @@ const $guideOverlay = document.getElementById("guideOverlay");
 const $scanLine     = document.getElementById("scanLine");
 const $captureBtn   = document.getElementById("captureBtn");
 const $switchBtn    = document.getElementById("switchBtn");
+const $flashBtn     = document.getElementById("flashBtn");
 const $uploadBtn    = document.getElementById("uploadBtn");
 const $fileInput    = document.getElementById("fileInput");
 const $resultSection= document.getElementById("resultSection");
@@ -56,6 +57,7 @@ let session = null;          // ONNX Runtime inference session
 let currentStream = null;    // MediaStream
 let facingMode = "environment";  // prefer rear camera
 let isProcessing = false;
+let flashOn = false;         // torch state
 
 
 // ─── Model Loading ───
@@ -99,6 +101,7 @@ async function loadModel() {
       $splash.classList.add("hidden");
       $app.classList.remove("hidden");
       startCamera();
+      checkFlashSupport();
     }, 600);
 
   } catch (err) {
@@ -165,14 +168,14 @@ function captureFrame() {
   document.querySelector(".camera-container").appendChild(flash);
   setTimeout(() => flash.remove(), 400);
 
-  // The guide overlay SVG viewBox is 400×400
-  // The nail zone is at: x=120, y=130, w=160, h=120
+  // The guide overlay SVG viewBox is 400×500
+  // The nail zone is at: x=130, y=115, w=140, h=105
   // Map from SVG coords to video coords
   const container = document.querySelector(".camera-container");
   const cRect = container.getBoundingClientRect();
 
   // SVG viewBox preserveAspectRatio="xMidYMid meet" -> compute actual SVG render area
-  const svgAspect = 1; // 400/400
+  const svgAspect = 400 / 500; // viewBox width / height
   const containerAspect = cRect.width / cRect.height;
 
   let svgRenderW, svgRenderH, svgOffsetX, svgOffsetY;
@@ -189,8 +192,8 @@ function captureFrame() {
     svgOffsetY = (cRect.height - svgRenderH) / 2;
   }
 
-  // Nail region in SVG coords
-  const nailSVG = { x: 120, y: 130, w: 160, h: 120 };
+  // Nail region in SVG coords (matches new overlay)
+  const nailSVG = { x: 130, y: 115, w: 140, h: 105 };
 
   // Convert to pixel coords within container
   const scale = svgRenderW / 400;
@@ -386,7 +389,10 @@ $captureBtn.addEventListener("click", captureFrame);
 
 $switchBtn.addEventListener("click", () => {
   facingMode = facingMode === "environment" ? "user" : "environment";
+  flashOn = false;
+  $flashBtn.classList.remove("flash-on");
   startCamera();
+  checkFlashSupport();
 });
 
 $uploadBtn.addEventListener("click", () => $fileInput.click());
@@ -406,6 +412,43 @@ document.addEventListener("keydown", (e) => {
   }
   if (e.code === "Escape") hideResult();
 });
+
+
+// ─── Flash / Torch ───
+
+async function checkFlashSupport() {
+  try {
+    if (!currentStream) return;
+    const track = currentStream.getVideoTracks()[0];
+    if (!track) return;
+    const caps = track.getCapabilities ? track.getCapabilities() : {};
+    if (caps.torch) {
+      $flashBtn.classList.remove("flash-unsupported");
+    } else {
+      $flashBtn.classList.add("flash-unsupported");
+    }
+  } catch {
+    $flashBtn.classList.add("flash-unsupported");
+  }
+}
+
+async function toggleFlash() {
+  try {
+    if (!currentStream) return;
+    const track = currentStream.getVideoTracks()[0];
+    if (!track) return;
+
+    flashOn = !flashOn;
+    await track.applyConstraints({ advanced: [{ torch: flashOn }] });
+    $flashBtn.classList.toggle("flash-on", flashOn);
+  } catch (err) {
+    console.warn("Torch not supported:", err.message);
+    $flashBtn.classList.add("flash-unsupported");
+    flashOn = false;
+  }
+}
+
+$flashBtn.addEventListener("click", toggleFlash);
 
 
 // ─── Utility ───

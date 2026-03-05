@@ -243,6 +243,43 @@ html, body {
   z-index: 2;
 }
 
+/* Animated nail dash border */
+.nail-dash {
+  animation: dashScroll 1.2s linear infinite;
+}
+@keyframes dashScroll {
+  to { stroke-dashoffset: -30; }
+}
+
+/* Instruction chip above controls */
+.instruction-chip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  padding: 0.45rem 1rem;
+  background: rgba(15, 23, 42, 0.88);
+  backdrop-filter: blur(8px);
+  font-size: 0.72rem;
+  color: var(--slate-300);
+  letter-spacing: 0.01em;
+  line-height: 1.4;
+  text-align: center;
+  flex-shrink: 0;
+}
+.chip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--red-500);
+  flex-shrink: 0;
+  animation: chipPulse 2s ease-in-out infinite;
+}
+@keyframes chipPulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.35; }
+}
+
 /* Scan line animation */
 .scan-line {
   position: absolute;
@@ -268,8 +305,8 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 2rem;
-  padding: 1.25rem 1rem;
+  gap: 1.25rem;
+  padding: 1rem 1rem 1.25rem;
   background: rgba(15, 23, 42, 0.95);
   backdrop-filter: blur(12px);
   flex-shrink: 0;
@@ -294,6 +331,22 @@ html, body {
   color: #fff;
 }
 .ctrl-btn svg { width: 20px; height: 20px; }
+
+/* Flash button active state */
+.ctrl-btn.flash-on {
+  background: var(--yellow-500);
+  border-color: var(--yellow-500);
+  color: var(--slate-900);
+}
+.ctrl-btn.flash-on:hover {
+  background: #facc15;
+  border-color: #facc15;
+  color: var(--slate-900);
+}
+.ctrl-btn.flash-unsupported {
+  opacity: 0.35;
+  pointer-events: none;
+}
 
 .capture-btn {
   width: 72px;
