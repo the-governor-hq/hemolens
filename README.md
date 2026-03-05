@@ -123,6 +123,14 @@ Input (224×224×3)
 - 3-fold session-aware cross-validation: **MAE = 1.912 ± 0.27 g/dL** (17 session groups)
 - End-to-end ONNX export (backbone + head) for edge deployment
 
+## ⚠️ Disclaimer
+
+> **This project is NOT a medical device.** HemoLens is a personal research project and is provided strictly for educational and experimental purposes. It has not been validated in a clinical setting, is not approved by any regulatory body (FDA, CE, Health Canada, etc.), and must **never** be used to make medical decisions, diagnose anemia, or replace a blood test.
+>
+> **Do not rely on this software for any health-related purpose.** If you suspect anemia or any medical condition, consult a qualified healthcare professional and get a proper complete blood count (CBC).
+>
+> The authors assume no liability for any use or misuse of this software.
+
 ## Requirements
 
 | Component       | Stack                              |
