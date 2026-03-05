@@ -1,6 +1,6 @@
 # HemoLens 🔬
 
-**A high-performance, offline Flutter engine for non-invasive hemoglobin level estimation.**
+**A high-performance, offline engine for non-invasive hemoglobin level estimation.**
 
 Powered by a hybrid pipeline: frozen MobileNetV4-Conv-Small features + CatBoost regression, using the 2024 Yakimov et al. fingernail dataset. Best test MAE = **1.305 g/dL** (R² = 0.46).
 
@@ -11,10 +11,10 @@ Powered by a hybrid pipeline: frozen MobileNetV4-Conv-Small features + CatBoost 
 ```
 HemoLens/
 ├── research/          # Jupyter notebooks — EDA, feature extraction, baselines
-├── model/             # PyTorch training, dataset prep & TFLite export
-├── flutter_plugin/    # Dart/C++ plugin for on-device inference
+├── model/             # PyTorch training, dataset prep & ONNX export
+├── web-demo/          # Browser-based demo (ONNX Runtime Web, runs offline)
 ├── example/           # Demo Flutter app with real-time camera detection
-├── assets/            # Quantized .tflite models and labels
+├── assets/            # Model files and labels
 └── data/              # Raw images, metadata, processed crops & features
 ```
 
@@ -24,8 +24,7 @@ HemoLens estimates hemoglobin (Hb) levels from smartphone camera images of finge
 
 1. **Research** — EDA on the Yakimov et al. (2024) fingernail image dataset, color-space feature extraction (RGB, LAB, HSV), and traditional ML baselines (Ridge, SVR, Gradient Boosting).
 2. **Model** — Frozen MobileNetV4-Conv-Small backbone as a feature extractor (1280-dim), combined with 67 handcrafted color features (RGB, LAB, HSV means/std/percentiles + redness index), feeding a CatBoost regression head. The hybrid approach significantly outperforms end-to-end fine-tuning in the small-data regime (250 patients). Export to ONNX for edge deployment.
-3. **Flutter Plugin** — On-device inference engine wrapping TFLite via `dart:ffi` / platform channels, with real-time camera preprocessing.
-4. **Example App** — A turnkey Flutter application demonstrating live Hb estimation from the device camera.
+3. **Web Demo** — Browser-based inference via ONNX Runtime Web (WASM). Runs 100% on-device — no server, no uploads, privacy-first. Includes camera guide overlay, flash toggle, and WHO severity classification.
 
 ## Baseline Results (Notebook 03)
 
@@ -65,10 +64,10 @@ The hybrid frozen-backbone approach beats end-to-end fine-tuning by >2× on this
 
 ## Key Features
 
-- **Offline-first**: All inference runs on-device — no cloud dependency.
+- **Offline-first**: All inference runs on-device — no server, no cloud dependency.
+- **Privacy-preserving**: No images are ever uploaded; everything stays in the browser.
 - **Lightweight model**: Frozen MobileNetV4-Conv-Small backbone (~2.5M params) + CatBoost head.
-- **Cross-platform**: Android (NNAPI) and iOS (Core ML delegate) support.
-- **Privacy-preserving**: No images leave the device.
+- **Web-ready**: ONNX Runtime Web (WASM) — works in any modern browser with a camera.
 
 ## Dataset
 
@@ -95,15 +94,16 @@ jupyter lab
 cd model
 pip install -r requirements.txt
 python prepare_dataset.py                              # crop nail ROIs → data/processed/
-python train_hybrid.py --config configs/mobilenet_edge.yaml  # hybrid: frozen CNN features + Ridge
-python export_tflite.py --checkpoint checkpoints/hemolens_hybrid.pth --quantize int8
+python train_hybrid.py --config configs/mobilenet_edge.yaml  # hybrid: frozen CNN features + CatBoost
+python export_hybrid.py                                # export to ONNX for web/edge deployment
 ```
 
-### 3. Run the Example App
+### 3. Run the Web Demo
 ```bash
-cd example
-flutter pub get
-flutter run
+cd web-demo
+python serve.py            # HTTPS on localhost:8443
+# or
+python serve.py --http --port 8080   # HTTP on localhost:8080
 ```
 
 ## Architecture
@@ -136,9 +136,9 @@ Input (224×224×3)
 | Component       | Stack                              |
 |-----------------|-------------------------------------|
 | Research        | Python 3.10+, Jupyter, pandas, matplotlib, seaborn |
-| Model Training  | PyTorch 2.x, timm, TFLite converter |
-| Flutter Plugin  | Flutter 3.22+, Dart 3.4+           |
-| On-device       | TFLite Runtime, Android NDK / Xcode |
+| Model Training  | PyTorch 2.x, timm, CatBoost, scikit-learn |
+| Web Demo        | Modern browser with WebAssembly + camera (Chrome, Firefox, Safari, Edge) |
+| Dev Server      | Python 3 (any static HTTPS server works) |
 
 ## License
 
