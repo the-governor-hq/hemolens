@@ -24,6 +24,12 @@
       </div>
       <h1 class="splash-title">HemoLens</h1>
       <p class="splash-sub">Non-invasive hemoglobin estimation</p>
+      <div class="splash-privacy">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/>
+        </svg>
+        100% on-device · No data leaves your phone
+      </div>
       <div class="loader">
         <div class="loader-bar"></div>
       </div>
@@ -43,7 +49,15 @@
         </svg>
         <span class="header-title">HemoLens</span>
       </div>
-      <span class="header-badge">Research Only</span>
+      <div class="header-badges">
+        <span class="header-badge badge-privacy">
+          <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0110 0v4"/>
+          </svg>
+          Offline · Private
+        </span>
+        <span class="header-badge">Research Only</span>
+      </div>
     </header>
 
     <!-- Camera View -->
@@ -264,6 +278,9 @@
     <!-- Disclaimer -->
     <footer class="disclaimer">
       <strong>⚠ Research only.</strong> Not a medical device. Do not use for diagnosis.
+      <span class="footer-sep">·</span>
+      <span class="footer-offline">🔒 Runs offline — no images are uploaded</span>
+      <span class="footer-sep">·</span>
       <a href="https://github.com/the-governor-hq/hemolens" target="_blank" rel="noopener">GitHub</a>
     </footer>
   </div>

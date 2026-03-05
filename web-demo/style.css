@@ -116,7 +116,24 @@ html, body {
   font-size: 0.95rem;
   color: var(--slate-400);
   font-weight: 400;
-  margin-bottom: 2rem;
+  margin-bottom: 1rem;
+}
+
+.splash-privacy {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.72rem;
+  color: var(--green-500);
+  background: rgba(34, 197, 94, 0.08);
+  border: 1px solid rgba(34, 197, 94, 0.18);
+  padding: 0.25rem 0.75rem;
+  border-radius: 100px;
+  margin-bottom: 1.5rem;
+}
+.splash-privacy svg {
+  flex-shrink: 0;
+  color: var(--green-500);
 }
 
 .loader {
@@ -196,6 +213,24 @@ html, body {
   padding: 0.2rem 0.6rem;
   border-radius: 100px;
   border: 1px solid rgba(249, 115, 22, 0.2);
+}
+
+.header-badges {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.badge-privacy {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--green-500);
+  background: rgba(34, 197, 94, 0.10);
+  border-color: rgba(34, 197, 94, 0.22);
+}
+.badge-privacy svg {
+  flex-shrink: 0;
 }
 
 
@@ -642,9 +677,17 @@ html, body {
 .disclaimer a {
   color: var(--slate-500);
   text-decoration: none;
-  margin-left: 0.5rem;
 }
 .disclaimer a:hover { color: var(--slate-300); }
+
+.footer-sep {
+  margin: 0 0.25rem;
+  color: var(--slate-700);
+}
+.footer-offline {
+  color: var(--green-500);
+  opacity: 0.8;
+}
 
 
 /* ─── Flash Animation (capture feedback) ─── */
