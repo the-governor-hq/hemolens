@@ -45,6 +45,14 @@ const SEVERITY = [
   { label: "Normal",   min: 13, max: 25, cls: "normal"   },
 ];
 
+// Prediction sanity gates — reject out-of-distribution / nonsensical results
+const PREDICTION_SANITY = {
+  minPlausible: 2.0,     // Hb below 2 g/dL is not compatible with life
+  maxPlausible: 20.0,    // Hb above 20 g/dL is physiologically impossible
+  maxStdDev:    3.0,     // if inter-frame std dev exceeds this, predictions are unreliable
+  maxRange:     8.0,     // if inter-frame range exceeds this, predictions are unreliable
+};
+
 
 // ─── DOM References ───
 
@@ -861,12 +869,26 @@ async function captureMultiFrame() {
       ctx.drawImage($captureCanvas, 0, 0);
     }
 
-    // Show result
+    // Sanity check: reject nonsensical predictions
+    const isOutOfRange = finalHb < PREDICTION_SANITY.minPlausible || finalHb > PREDICTION_SANITY.maxPlausible;
+    const isHighVariance = sd > PREDICTION_SANITY.maxStdDev || range > PREDICTION_SANITY.maxRange;
+
+    if (isOutOfRange) {
+      alert(
+        `Result rejected: predicted Hb = ${finalHb.toFixed(1)} g/dL is outside the physiologically plausible range (${PREDICTION_SANITY.minPlausible}–${PREDICTION_SANITY.maxPlausible} g/dL).\n\n` +
+        `This usually means the camera is not pointing at a fingernail, or the lighting conditions are too far from the training data.\n\n` +
+        `Std Dev: ${sd.toFixed(1)} g/dL · Range: ${range.toFixed(1)} g/dL`
+      );
+      return;
+    }
+
+    // Show result (with unreliable flag if high variance)
     showResult(lastPreviewCanvas, finalHb, {
       framesUsed: kept.length,
       framesTotal: predictions.length,
       stdDev: sd,
       range: range,
+      unreliable: isHighVariance,
     });
 
   } catch (err) {
@@ -898,6 +920,16 @@ async function processImage(sourceCanvas) {
     }
 
     const hb = await inferSingle(imageData);
+
+    // Single-frame OOD check
+    if (hb < PREDICTION_SANITY.minPlausible || hb > PREDICTION_SANITY.maxPlausible) {
+      alert(
+        `Result rejected: predicted Hb = ${hb.toFixed(1)} g/dL is outside the plausible range (${PREDICTION_SANITY.minPlausible}–${PREDICTION_SANITY.maxPlausible} g/dL).\n\n` +
+        `This image is likely out-of-distribution. Please try with a clearer fingernail photo.`
+      );
+      return;
+    }
+
     showResult(sourceCanvas, hb, null);
 
   } catch (err) {
@@ -913,7 +945,7 @@ async function processImage(sourceCanvas) {
 // ─── Result Display ───
 
 function showResult(sourceCanvas, hbValue, stats) {
-  // Clamp to reasonable range
+  // Clamp to displayable range (physiological boundaries)
   const hb = Math.max(2, Math.min(20, hbValue));
 
   // Draw preview
@@ -942,6 +974,20 @@ function showResult(sourceCanvas, hbValue, stats) {
     normal:   "var(--green-500)",
   };
   $hbValue.style.color = colorMap[severity.cls] || "#fff";
+
+  // Unreliable result warning
+  const $unreliableWarning = document.getElementById("unreliableWarning");
+  if ($unreliableWarning) {
+    if (stats && stats.unreliable) {
+      $unreliableWarning.classList.remove("hidden");
+      // Override badge to show unreliable
+      $severityBadge.textContent = severity.label + " (unreliable)";
+      $severityBadge.className = "severity-badge unreliable";
+      $hbValue.style.color = "var(--yellow-500, #eab308)";
+    } else {
+      $unreliableWarning.classList.add("hidden");
+    }
+  }
 
   // Multi-frame stats (if available)
   if (stats && $multiFrameStats) {

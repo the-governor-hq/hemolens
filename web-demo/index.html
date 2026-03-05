@@ -325,6 +325,12 @@
         <!-- Severity badge -->
         <div id="severityBadge" class="severity-badge normal">Normal</div>
 
+        <!-- Unreliable result warning -->
+        <div id="unreliableWarning" class="unreliable-warning hidden">
+          <strong>⚠ Unreliable prediction</strong>
+          <p>Frame-to-frame predictions varied too much (high std dev or range). This usually means the fingernail was not clearly visible, lighting changed, or the input is out-of-distribution. <strong>Do not trust this result.</strong></p>
+        </div>
+
         <!-- Confidence note -->
         <p class="result-note">
           Multi-frame median of 30 captures with IQR outlier rejection.
