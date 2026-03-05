@@ -201,6 +201,8 @@
             <p class="scan-label">Analyzing frames&hellip;</p>
             <!-- Live mini-predictions -->
             <div class="scan-dots" id="scanDots"></div>
+            <!-- Live thumbnails (debug) -->
+            <div id="scanThumbs" class="scan-thumbs hidden" aria-label="Scan thumbnails"></div>
             <button id="scanCancelBtn" class="scan-cancel-btn">Cancel</button>
           </div>
         </div>
@@ -304,8 +306,25 @@
         <!-- Confidence note -->
         <p class="result-note">
           Multi-frame median of 30 captures with IQR outlier rejection.
-          <br/>Model MAE ≈ 1.3 g/dL on test set. Not a substitute for a blood test.
+          <br/>Deployed web model MAE is higher on single frames; multi-frame improves stability. Not a substitute for a blood test.
         </p>
+
+        <!-- Debug / pipeline visualization -->
+        <details id="debugDetails" class="debug-details">
+          <summary>Debug: frames &amp; pipeline</summary>
+          <div class="debug-controls">
+            <label class="debug-toggle">
+              <input type="checkbox" id="debugEnable" checked />
+              <span>Show live thumbnails</span>
+            </label>
+            <label class="debug-toggle">
+              <input type="checkbox" id="ttaToggle" checked />
+              <span>Flip TTA (avg original + mirrored)</span>
+            </label>
+          </div>
+          <div class="debug-grid" id="debugFramesGrid" aria-label="Captured frames"></div>
+          <p class="debug-hint">Gray = invalid frame · Red outline = IQR outlier (excluded from median)</p>
+        </details>
 
         <!-- Actions -->
         <div class="result-actions">
@@ -324,7 +343,7 @@
     <footer class="disclaimer">
       <strong>⚠ Research only.</strong> Not a medical device. Do not use for diagnosis.
       <span class="footer-sep">·</span>
-      <span class="footer-offline">🔒 Runs offline — no images are uploaded</span>
+      <span class="footer-offline">🔒 Client-side inference — no images are uploaded</span>
       <span class="footer-sep">·</span>
       <a href="https://github.com/the-governor-hq/hemolens" target="_blank" rel="noopener">GitHub</a>
     </footer>

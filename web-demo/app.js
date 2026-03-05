@@ -19,6 +19,13 @@ const IMAGENET_STD  = [0.229, 0.224, 0.225];
 const MULTI_FRAME_COUNT = 30;
 const FRAME_INTERVAL_MS = 80;  // ~12.5 fps capture rate
 
+// Inference options
+let useFlipTTA = true; // average original + horizontally-flipped inference
+
+// Debug / visualization
+let debugEnabled = false;
+const DEBUG_THUMBS_MAX = 12;
+
 // Frame validity gates (to avoid "normal" results on blocked/black frames)
 // These thresholds are intentionally conservative and should be tuned with real captures.
 const MIN_VALID_FRAMES = 10;
@@ -71,12 +78,18 @@ const $scanRingProgress = document.getElementById("scanRingProgress");
 const $scanFrameNum     = document.getElementById("scanFrameNum");
 const $scanDots         = document.getElementById("scanDots");
 const $scanCancelBtn    = document.getElementById("scanCancelBtn");
+const $scanThumbs        = document.getElementById("scanThumbs");
 
 // Multi-frame stats
 const $multiFrameStats  = document.getElementById("multiFrameStats");
 const $statFramesUsed   = document.getElementById("statFramesUsed");
 const $statStdDev       = document.getElementById("statStdDev");
 const $statRange        = document.getElementById("statRange");
+
+// Debug elements (optional)
+const $debugEnable     = document.getElementById("debugEnable");
+const $ttaToggle       = document.getElementById("ttaToggle");
+const $debugFramesGrid = document.getElementById("debugFramesGrid");
 
 
 // ─── State ───
@@ -167,6 +180,40 @@ function resetForNewCapture() {
   $scanRingProgress.style.strokeDashoffset = 2 * Math.PI * 52;
   $scanOverlay.classList.add("hidden");
   $guideOverlay.style.opacity = "";
+
+  // Reset debug UI
+  if ($debugFramesGrid) $debugFramesGrid.innerHTML = "";
+  if ($scanThumbs) {
+    $scanThumbs.innerHTML = "";
+    $scanThumbs.classList.add("hidden");
+  }
+}
+
+
+// ─── Debug Wiring ───
+
+function initDebugControls() {
+  if ($debugEnable) {
+    debugEnabled = Boolean($debugEnable.checked);
+    $debugEnable.addEventListener("change", (e) => {
+      debugEnabled = Boolean(e.target.checked);
+      if ($scanThumbs) {
+        if (debugEnabled) $scanThumbs.classList.remove("hidden");
+        else $scanThumbs.classList.add("hidden");
+      }
+    });
+  }
+  if ($ttaToggle) {
+    useFlipTTA = Boolean($ttaToggle.checked);
+    $ttaToggle.addEventListener("change", (e) => {
+      useFlipTTA = Boolean(e.target.checked);
+    });
+  }
+
+  if ($scanThumbs) {
+    if (debugEnabled) $scanThumbs.classList.remove("hidden");
+    else $scanThumbs.classList.add("hidden");
+  }
 }
 
 
@@ -210,6 +257,7 @@ async function loadModel() {
     setTimeout(() => {
       $splash.classList.add("hidden");
       $app.classList.remove("hidden");
+      initDebugControls();
       startCamera();
       checkFlashSupport();
     }, 600);
@@ -382,22 +430,101 @@ function preprocessCanvasToImageData(srcCanvas) {
 
 /** Run inference on a single ImageData → Hb prediction */
 async function inferSingle(imageData) {
-  const pixels = imageData.data;
-  const float32Data = new Float32Array(3 * INPUT_SIZE * INPUT_SIZE);
-  const pixelCount = INPUT_SIZE * INPUT_SIZE;
+  function toTensorData(flipX) {
+    const pixels = imageData.data;
+    const float32Data = new Float32Array(3 * INPUT_SIZE * INPUT_SIZE);
+    const pixelCount = INPUT_SIZE * INPUT_SIZE;
 
-  for (let i = 0; i < pixelCount; i++) {
-    const r = pixels[i * 4]     / 255.0;
-    const g = pixels[i * 4 + 1] / 255.0;
-    const b = pixels[i * 4 + 2] / 255.0;
-    float32Data[0 * pixelCount + i] = (r - IMAGENET_MEAN[0]) / IMAGENET_STD[0];
-    float32Data[1 * pixelCount + i] = (g - IMAGENET_MEAN[1]) / IMAGENET_STD[1];
-    float32Data[2 * pixelCount + i] = (b - IMAGENET_MEAN[2]) / IMAGENET_STD[2];
+    for (let y = 0; y < INPUT_SIZE; y++) {
+      for (let x = 0; x < INPUT_SIZE; x++) {
+        const dx = x;
+        const sx = flipX ? (INPUT_SIZE - 1 - x) : x;
+        const di = y * INPUT_SIZE + dx;
+        const si = y * INPUT_SIZE + sx;
+        const p = si * 4;
+        const r = pixels[p]     / 255.0;
+        const g = pixels[p + 1] / 255.0;
+        const b = pixels[p + 2] / 255.0;
+
+        float32Data[0 * pixelCount + di] = (r - IMAGENET_MEAN[0]) / IMAGENET_STD[0];
+        float32Data[1 * pixelCount + di] = (g - IMAGENET_MEAN[1]) / IMAGENET_STD[1];
+        float32Data[2 * pixelCount + di] = (b - IMAGENET_MEAN[2]) / IMAGENET_STD[2];
+      }
+    }
+    return float32Data;
   }
 
-  const inputTensor = new ort.Tensor("float32", float32Data, [1, 3, INPUT_SIZE, INPUT_SIZE]);
-  const results = await session.run({ image: inputTensor });
-  return results.hb_prediction.data[0];
+  async function runOnce(flipX) {
+    const inputTensor = new ort.Tensor("float32", toTensorData(flipX), [1, 3, INPUT_SIZE, INPUT_SIZE]);
+    const results = await session.run({ image: inputTensor });
+    return results.hb_prediction.data[0];
+  }
+
+  const y1 = await runOnce(false);
+  if (!useFlipTTA) return y1;
+  const y2 = await runOnce(true);
+  return (y1 + y2) / 2.0;
+}
+
+
+// ─── Debug Rendering Helpers ───
+
+function imageDataToThumbCanvas(imageData, size) {
+  const tmp = document.createElement("canvas");
+  tmp.width = INPUT_SIZE;
+  tmp.height = INPUT_SIZE;
+  const tctx = tmp.getContext("2d");
+  tctx.putImageData(imageData, 0, 0);
+
+  const out = document.createElement("canvas");
+  out.width = size;
+  out.height = size;
+  const octx = out.getContext("2d");
+  octx.imageSmoothingEnabled = true;
+  octx.drawImage(tmp, 0, 0, size, size);
+  return out;
+}
+
+function makeFrameTile(imageData, labelText) {
+  const tile = document.createElement("div");
+  tile.className = "debug-frame";
+
+  const canvas = imageDataToThumbCanvas(imageData, 64);
+  tile.appendChild(canvas);
+
+  const label = document.createElement("div");
+  label.className = "debug-label";
+  label.textContent = labelText;
+  tile.appendChild(label);
+
+  return { tile, label };
+}
+
+function makeScanThumb(imageData, labelText) {
+  const tile = document.createElement("div");
+  tile.className = "scan-thumb";
+
+  const canvas = imageDataToThumbCanvas(imageData, 48);
+  tile.appendChild(canvas);
+
+  const label = document.createElement("div");
+  label.className = "scan-thumb-label";
+  label.textContent = labelText;
+  tile.appendChild(label);
+
+  return { tile, label };
+}
+
+function renderScanThumbStrip(frameTiles) {
+  if (!$scanThumbs || !debugEnabled) return;
+  $scanThumbs.classList.remove("hidden");
+  $scanThumbs.innerHTML = "";
+
+  const last = frameTiles.slice(-DEBUG_THUMBS_MAX);
+  for (const t of last) {
+    const clone = t.scanTile;
+    if (clone) $scanThumbs.appendChild(clone);
+  }
 }
 
 
@@ -505,6 +632,8 @@ async function captureMultiFrame() {
   $guideOverlay.style.opacity = "0.3";
 
   const predictions = [];
+  const frameTiles = []; // one per captured frame (including invalid)
+  const predIdxToFrameIdx = []; // maps prediction index -> frame index
   let invalidFrames = 0;
   let lastPreviewCanvas = null;
 
@@ -518,11 +647,25 @@ async function captureMultiFrame() {
       // Grab frame
       const imageData = grabNailFrame(crop);
 
+      // Create debug tiles early (so invalid frames are also visible)
+      const dbg = $debugFramesGrid ? makeFrameTile(imageData, `#${i + 1}`) : null;
+      const scan = $scanThumbs ? makeScanThumb(imageData, `#${i + 1}`) : null;
+      const tiles = { dbgTile: dbg?.tile, dbgLabel: dbg?.label, scanTile: scan?.tile, scanLabel: scan?.label };
+      frameTiles.push(tiles);
+      if (tiles.dbgTile && $debugFramesGrid) $debugFramesGrid.appendChild(tiles.dbgTile);
+
       // Reject blocked/black/overexposed/too-uniform frames
       const validity = isFrameValid(imageData);
       if (!validity.ok) {
         invalidFrames++;
         updateScanUI(i + 1, MULTI_FRAME_COUNT, null);
+
+        if (tiles.dbgTile) tiles.dbgTile.classList.add("invalid");
+        if (tiles.scanTile) tiles.scanTile.classList.add("invalid");
+        if (tiles.dbgLabel) tiles.dbgLabel.textContent = `#${i + 1} invalid`;
+        if (tiles.scanLabel) tiles.scanLabel.textContent = "invalid";
+
+        renderScanThumbStrip(frameTiles);
 
         // If it's impossible to reach MIN_VALID_FRAMES anymore, bail early
         const framesLeft = (MULTI_FRAME_COUNT - 1) - i;
@@ -555,6 +698,12 @@ async function captureMultiFrame() {
       // Run inference
       const hb = await inferSingle(imageData);
       predictions.push(hb);
+      predIdxToFrameIdx.push(i);
+
+      if (tiles.dbgLabel) tiles.dbgLabel.textContent = `#${i + 1} ${hb.toFixed(1)}`;
+      if (tiles.scanLabel) tiles.scanLabel.textContent = hb.toFixed(1);
+
+      renderScanThumbStrip(frameTiles);
 
       // Update UI
       updateScanUI(i + 1, MULTI_FRAME_COUNT, hb);
@@ -594,6 +743,15 @@ async function captureMultiFrame() {
       }
     }
     markOutlierDots(predictions, rejectedIdxs);
+
+    // Mark outliers in thumbnail tiles
+    for (const predIdx of rejectedIdxs) {
+      const frameIdx = predIdxToFrameIdx[predIdx];
+      const t = frameTiles[frameIdx];
+      if (!t) continue;
+      if (t.dbgTile) t.dbgTile.classList.add("outlier");
+      if (t.scanTile) t.scanTile.classList.add("outlier");
+    }
 
     // Brief pause to show outlier markings
     await sleep(400);
