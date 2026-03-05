@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>HemoLens - Non-Invasive Hb Estimation</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+
+  <!-- ONNX Runtime Web -->
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.3/dist/ort.min.js"></script>
+</head>
+<body>
+
+  <!-- ─── Splash / Loading ─── -->
+  <div id="splash" class="splash">
+    <div class="splash-inner">
+      <div class="logo-pulse">
+        <svg viewBox="0 0 64 64" class="logo-icon">
+          <circle cx="32" cy="32" r="28" fill="none" stroke="currentColor" stroke-width="2"/>
+          <path d="M32 16 C24 24, 18 32, 32 48 C46 32, 40 24, 32 16Z" fill="currentColor" opacity="0.8"/>
+        </svg>
+      </div>
+      <h1 class="splash-title">HemoLens</h1>
+      <p class="splash-sub">Non-invasive hemoglobin estimation</p>
+      <div class="loader">
+        <div class="loader-bar"></div>
+      </div>
+      <p id="splashStatus" class="splash-status">Loading model...</p>
+    </div>
+  </div>
+
+  <!-- ─── Main App ─── -->
+  <div id="app" class="app hidden">
+
+    <!-- Header -->
+    <header class="header">
+      <div class="header-left">
+        <svg viewBox="0 0 64 64" class="header-logo">
+          <circle cx="32" cy="32" r="28" fill="none" stroke="currentColor" stroke-width="2"/>
+          <path d="M32 16 C24 24, 18 32, 32 48 C46 32, 40 24, 32 16Z" fill="currentColor" opacity="0.8"/>
+        </svg>
+        <span class="header-title">HemoLens</span>
+      </div>
+      <span class="header-badge">Research Only</span>
+    </header>
+
+    <!-- Camera View -->
+    <section id="cameraSection" class="camera-section">
+      <div class="camera-container">
+        <video id="video" autoplay playsinline muted></video>
+        <canvas id="captureCanvas" class="capture-canvas"></canvas>
+
+        <!-- SVG Finger Guide Overlay -->
+        <svg id="guideOverlay" class="guide-overlay" viewBox="0 0 400 400" preserveAspectRatio="xMidYMid meet">
+          <!-- Dim everything outside the nail zone -->
+          <defs>
+            <mask id="cutout">
+              <rect width="400" height="400" fill="white"/>
+              <rect x="120" y="130" width="160" height="120" rx="24" ry="24" fill="black"/>
+            </mask>
+          </defs>
+          <rect width="400" height="400" fill="rgba(0,0,0,0.45)" mask="url(#cutout)"/>
+
+          <!-- Nail outline guide -->
+          <rect x="120" y="130" width="160" height="120" rx="24" ry="24"
+                fill="none" stroke="rgba(255,255,255,0.85)" stroke-width="2.5" stroke-dasharray="8 4"/>
+
+          <!-- Corner brackets -->
+          <path d="M130 145 L130 138 Q130 130 138 130 L148 130" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
+          <path d="M270 145 L270 138 Q270 130 262 130 L252 130" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
+          <path d="M130 235 L130 242 Q130 250 138 250 L148 250" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
+          <path d="M270 235 L270 242 Q270 250 262 250 L252 250" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
+
+          <!-- Fingertip silhouette hint -->
+          <path d="M200 280 C160 280, 140 260, 140 250 L140 250 L260 250 C260 260, 240 280, 200 280Z"
+                fill="rgba(255,255,255,0.08)" stroke="rgba(255,255,255,0.2)" stroke-width="1"/>
+
+          <!-- Label -->
+          <text x="200" y="118" text-anchor="middle" fill="rgba(255,255,255,0.9)"
+                font-size="13" font-family="Inter, sans-serif" font-weight="500">
+            Place fingernail here
+          </text>
+          <text x="200" y="290" text-anchor="middle" fill="rgba(255,255,255,0.5)"
+                font-size="11" font-family="Inter, sans-serif" font-weight="400">
+            Hold still · Good lighting · No nail polish
+          </text>
+        </svg>
+
+        <!-- Scanning animation (shown during inference) -->
+        <div id="scanLine" class="scan-line hidden"></div>
+      </div>
+
+      <!-- Camera controls -->
+      <div class="camera-controls">
+        <button id="switchBtn" class="ctrl-btn" title="Switch camera" aria-label="Switch camera">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M23 4v6h-6"/><path d="M1 20v-6h6"/>
+            <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
+          </svg>
+        </button>
+        <button id="captureBtn" class="capture-btn" title="Capture" aria-label="Capture image">
+          <div class="capture-ring">
+            <div class="capture-dot"></div>
+          </div>
+        </button>
+        <button id="uploadBtn" class="ctrl-btn" title="Upload image" aria-label="Upload image">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+            <polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+        </button>
+        <input type="file" id="fileInput" accept="image/*" class="hidden" />
+      </div>
+    </section>
+
+    <!-- Result Card -->
+    <section id="resultSection" class="result-section hidden">
+      <div class="result-card">
+        <div class="result-header">
+          <h2>Estimation Result</h2>
+          <button id="closeResult" class="close-btn" aria-label="Close">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+
+        <!-- Captured image preview -->
+        <div class="result-preview">
+          <canvas id="previewCanvas"></canvas>
+        </div>
+
+        <!-- Hb value -->
+        <div class="result-value-wrap">
+          <span class="result-label">Estimated Hemoglobin</span>
+          <div class="result-value">
+            <span id="hbValue" class="hb-number">--</span>
+            <span class="hb-unit">g/dL</span>
+          </div>
+        </div>
+
+        <!-- Severity gauge -->
+        <div class="gauge-container">
+          <div class="gauge-bar">
+            <div class="gauge-zone severe" style="width:17%"><span>Severe</span></div>
+            <div class="gauge-zone moderate" style="width:17%"><span>Moderate</span></div>
+            <div class="gauge-zone mild" style="width:17%"><span>Mild</span></div>
+            <div class="gauge-zone normal" style="width:49%"><span>Normal</span></div>
+          </div>
+          <div id="gaugeMarker" class="gauge-marker" style="left:50%">
+            <div class="gauge-needle"></div>
+          </div>
+          <div class="gauge-labels">
+            <span>0</span><span>8</span><span>11</span><span>13</span><span>18</span>
+          </div>
+        </div>
+
+        <!-- Severity badge -->
+        <div id="severityBadge" class="severity-badge normal">Normal</div>
+
+        <!-- Confidence note -->
+        <p class="result-note">
+          Model accuracy: MAE ≈ 1.3 g/dL on test set (R² = 0.46).
+          <br/>This estimate can vary ±1–2 g/dL from a lab CBC.
+        </p>
+
+        <!-- Actions -->
+        <div class="result-actions">
+          <button id="retakeBtn" class="btn btn-outline">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" width="18" height="18">
+              <path d="M23 4v6h-6"/><path d="M1 20v-6h6"/>
+              <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/>
+            </svg>
+            Retake
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Disclaimer -->
+    <footer class="disclaimer">
+      <strong>⚠ Research only.</strong> Not a medical device. Do not use for diagnosis.
+      <a href="https://github.com/the-governor-hq/hemolens" target="_blank" rel="noopener">GitHub</a>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
