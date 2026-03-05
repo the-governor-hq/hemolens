@@ -27,6 +27,24 @@
 </head>
 <body>
 
+  <!-- ─── SW Update Banner ─── -->
+  <div id="swUpdateBanner" hidden
+       style="position:fixed;top:0;left:0;right:0;z-index:9999;
+              background:#1a73e8;color:#fff;padding:10px 16px;
+              display:flex;align-items:center;gap:12px;font-size:14px;
+              box-shadow:0 2px 8px rgba(0,0,0,.3);">
+    <span style="flex:1">&#x1F504; App update available.</span>
+    <button id="swUpdateReload"
+            style="background:#fff;color:#1a73e8;border:none;border-radius:4px;
+                   padding:6px 14px;font-weight:600;cursor:pointer;">
+      Reload
+    </button>
+    <button onclick="this.parentElement.hidden=true"
+            style="background:none;border:none;color:#fff;font-size:18px;
+                   cursor:pointer;line-height:1;"
+            aria-label="Dismiss">&times;</button>
+  </div>
+
   <!-- ─── Splash / Loading ─── -->
   <div id="splash" class="splash">
     <div class="splash-inner">
@@ -79,6 +97,8 @@
       <div class="camera-container">
         <video id="video" autoplay playsinline muted></video>
         <canvas id="captureCanvas" class="capture-canvas"></canvas>
+        <!-- Live nail detection overlay — drawn by nail_detector.js detect loop -->
+        <canvas id="detectCanvas" class="detect-canvas" width="1" height="1" aria-hidden="true"></canvas>
 
         <!-- SVG Finger Guide Overlay — anatomical silhouette -->
         <svg id="guideOverlay" class="guide-overlay" viewBox="0 0 400 500" preserveAspectRatio="xMidYMid meet">
@@ -437,14 +457,59 @@
 
   <script src="app.js"></script>
 
-  <!-- PWA Service Worker -->
+  <!-- PWA Service Worker + update flow -->
   <script>
     if ("serviceWorker" in navigator) {
       window.addEventListener("load", () => {
-        navigator.serviceWorker.register("./sw.js").then(
-          (reg) => console.log("[SW] Registered, scope:", reg.scope),
-          (err) => console.warn("[SW] Registration failed:", err)
-        );
+        navigator.serviceWorker.register("./sw.js").then((reg) => {
+          console.log("[SW] Registered, scope:", reg.scope);
+
+          // ── Detect a waiting SW (installed but not yet active) ──
+          function onWaitingSW(waitingWorker) {
+            const banner = document.getElementById("swUpdateBanner");
+            if (!banner) return;
+            banner.hidden = false;
+            document.getElementById("swUpdateReload").onclick = () => {
+              // Tell the waiting SW to take over immediately
+              waitingWorker.postMessage({ type: "SKIP_WAITING" });
+            };
+          }
+
+          // Already waiting when the page loaded (e.g. user refreshed mid-update)
+          if (reg.waiting) {
+            onWaitingSW(reg.waiting);
+          }
+
+          // New SW found during this page session
+          reg.addEventListener("updatefound", () => {
+            const newWorker = reg.installing;
+            newWorker.addEventListener("statechange", () => {
+              if (newWorker.state === "installed" && navigator.serviceWorker.controller) {
+                // A new version is ready and waiting
+                onWaitingSW(newWorker);
+              }
+            });
+          });
+
+          // Periodically check for updates (every 60 s) so long-lived sessions notice new deployments
+          setInterval(() => reg.update(), 60_000);
+        }).catch((err) => console.warn("[SW] Registration failed:", err));
+
+        // When the SW controller changes (new SW took over), reload to get fresh assets
+        let swControllerChanging = false;
+        navigator.serviceWorker.addEventListener("controllerchange", () => {
+          if (swControllerChanging) return;
+          swControllerChanging = true;
+          window.location.reload();
+        });
+
+        // Also handle the broadcast message the SW sends after activation
+        navigator.serviceWorker.addEventListener("message", (event) => {
+          if (event.data && event.data.type === "SW_UPDATED") {
+            // SW already claimed us — reload to pick up new assets
+            window.location.reload();
+          }
+        });
       });
     }
   </script>

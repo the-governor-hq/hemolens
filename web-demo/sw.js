@@ -7,7 +7,7 @@
      - Stale-while-revalidate for model updates
    ================================================================ */
 
-const CACHE_NAME = "hemolens-v2";
+const CACHE_NAME = "hemolens-v4";
 
 // App shell — files that must be cached for offline use
 const APP_SHELL = [
@@ -49,23 +49,42 @@ self.addEventListener("install", (event) => {
       }
     })
   );
-  // Activate immediately without waiting for old SW to finish
-  self.skipWaiting();
+  // Do NOT call skipWaiting() here — activation is triggered by the page
+  // via a SKIP_WAITING message (or falls through to normal browser takeover).
+  // This prevents the new SW from cutting in while a scan is in progress.
+  // If you want instant takeover without user prompt, uncomment the line below:
+  // self.skipWaiting();
 });
 
 // ─── Activate ───
 self.addEventListener("activate", (event) => {
   event.waitUntil(
-    caches.keys().then((keys) =>
-      Promise.all(
-        keys
-          .filter((key) => key !== CACHE_NAME)
-          .map((key) => caches.delete(key))
+    caches.keys()
+      .then((keys) =>
+        Promise.all(
+          keys
+            .filter((key) => key !== CACHE_NAME)
+            .map((key) => caches.delete(key))
+        )
       )
-    )
+      .then(() => {
+        // Claim all open clients immediately
+        return self.clients.claim();
+      })
+      .then(() => {
+        // Notify all clients that a new version is active — they will reload
+        return self.clients.matchAll({ type: "window" }).then((clients) => {
+          clients.forEach((client) => client.postMessage({ type: "SW_UPDATED" }));
+        });
+      })
   );
-  // Claim all open clients immediately
-  self.clients.claim();
+});
+
+// ─── Message handling (controlled activation) ───
+self.addEventListener("message", (event) => {
+  if (event.data && event.data.type === "SKIP_WAITING") {
+    self.skipWaiting();
+  }
 });
 
 // ─── Fetch ───
@@ -81,9 +100,10 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // ONNX model — cache-first (large file, rarely changes)
+  // ONNX model — stale-while-revalidate: serve cached copy instantly,
+  // fetch fresh version in the background so next visit gets the update.
   if (request.url.includes(".onnx")) {
-    event.respondWith(cacheFirst(request));
+    event.respondWith(staleWhileRevalidate(request));
     return;
   }
 

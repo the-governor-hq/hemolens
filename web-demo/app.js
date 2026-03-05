@@ -99,6 +99,7 @@ const $multiFrameStats  = document.getElementById("multiFrameStats");
 const $statFramesUsed   = document.getElementById("statFramesUsed");
 const $statStdDev       = document.getElementById("statStdDev");
 const $statRange        = document.getElementById("statRange");
+const $detectCanvas     = document.getElementById("detectCanvas");
 
 // Debug elements (optional)
 const $debugEnable     = document.getElementById("debugEnable");
@@ -118,6 +119,10 @@ let flashOn = false;         // torch state
 let scanAborted = false;     // cancel flag for multi-frame
 let lightMonitorId = null;   // setInterval handle for ambient light check
 let lowLightDismissed = false; // user dismissed the banner this session
+let _liveDetectRunning = false; // live detection overlay loop active
+let _liveDetectRAF = null;      // requestAnimationFrame handle
+let _liveDetectLastRun = 0;     // timestamp of last detection run
+const LIVE_DETECT_INTERVAL_MS = 165; // ~6 fps
 
 
 // ─── Instruction Text ───
@@ -143,6 +148,209 @@ function setInstructionMode(mode) {
     txt = INSTRUCTIONS.cameraManual;
   }
   $instructionText.textContent = txt;
+}
+
+
+// ─── Live Detection Overlay ───
+
+/** Start the nail detection overlay loop (no-op if detector not available). */
+function startLiveDetect() {
+  if (!detectorAvailable || !$detectCanvas) return;
+  if (_liveDetectRunning) return; // already running
+  _liveDetectRunning = true;
+  _liveDetectRAF = requestAnimationFrame(_liveDetectTick);
+}
+
+/** Stop the detection overlay loop and clear the canvas. */
+function stopLiveDetect() {
+  _liveDetectRunning = false;
+  if (_liveDetectRAF !== null) {
+    cancelAnimationFrame(_liveDetectRAF);
+    _liveDetectRAF = null;
+  }
+  if ($detectCanvas) {
+    const ctx = $detectCanvas.getContext("2d");
+    ctx.clearRect(0, 0, $detectCanvas.width, $detectCanvas.height);
+  }
+}
+
+function _liveDetectTick(now) {
+  if (!_liveDetectRunning) return;
+  if (now - _liveDetectLastRun >= LIVE_DETECT_INTERVAL_MS) {
+    _liveDetectLastRun = now;
+    _runLiveDetect(); // fire-and-forget
+  }
+  _liveDetectRAF = requestAnimationFrame(_liveDetectTick);
+}
+
+async function _runLiveDetect() {
+  if (!_liveDetectRunning) return;
+  // Pause during active scanning — inference loop is already calling the detector
+  if (isProcessing) return;
+
+  if (!$video || $video.readyState < 2 || !$video.videoWidth) return;
+  if (!$detectCanvas) return;
+
+  // Use the canvas's actual CSS-rendered size (never its intrinsic buffer size)
+  const rect = $detectCanvas.getBoundingClientRect();
+  const cw = Math.round(rect.width);
+  const ch = Math.round(rect.height);
+  if (!cw || !ch) return;
+
+  // Sync pixel buffer to displayed size only when it changes
+  if ($detectCanvas.width !== cw || $detectCanvas.height !== ch) {
+    $detectCanvas.width  = cw;
+    $detectCanvas.height = ch;
+  }
+
+  const ctx = $detectCanvas.getContext("2d");
+  ctx.clearRect(0, 0, cw, ch);
+
+  // Hide boxes when the result panel is showing (camera is covered)
+  if (!$resultSection.classList.contains("hidden")) return;
+
+  try {
+    const { imageData, width: vw, height: vh } = grabFullFrame();
+    const detections = await nailDetector.detect(imageData, vw, vh);
+
+    if (!_liveDetectRunning || isProcessing) return; // aborted while awaiting
+
+    // Recompute in case the canvas was resized while awaiting
+    const rect2 = $detectCanvas.getBoundingClientRect();
+    const cw2 = Math.round(rect2.width);
+    const ch2 = Math.round(rect2.height);
+    if (!cw2 || !ch2 || $detectCanvas.width !== cw2 || $detectCanvas.height !== ch2) return;
+
+    // Map video pixels → displayed CSS pixels for object-fit: cover
+    // Cover: video fills the container, excess is clipped (no letterboxing visible)
+    const videoAspect = vw / vh;
+    const containerAspect = cw2 / ch2;
+    let scale, offX, offY;
+    if (containerAspect > videoAspect) {
+      // Container is wider → scale to fill width, clip top/bottom
+      scale = cw2 / vw;
+      offX  = 0;
+      offY  = (ch2 - vh * scale) / 2;
+    } else {
+      // Container is taller → scale to fill height, clip left/right
+      scale = ch2 / vh;
+      offX  = (cw2 - vw * scale) / 2;
+      offY  = 0;
+    }
+
+    _drawDetectionBoxes(ctx, detections, scale, offX, offY, cw2, ch2);
+  } catch (_) {
+    // Silently ignore transient errors (model warming up, frame grab race, etc.)
+  }
+}
+
+/** Draw a rounded rect, with fallback for older browsers. */
+function _rrect(ctx, x, y, w, h, r) {
+  if (typeof ctx.roundRect === "function") {
+    ctx.roundRect(x, y, w, h, r);
+  } else {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.arcTo(x + w, y,     x + w, y + r,     r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+    ctx.lineTo(x + r, y + h);
+    ctx.arcTo(x,     y + h, x,     y + h - r, r);
+    ctx.lineTo(x, y + r);
+    ctx.arcTo(x,     y,     x + r, y,         r);
+    ctx.closePath();
+  }
+}
+
+/**
+ * Render detection boxes and a status badge onto the overlay canvas.
+ * detections = [{ x, y, w, h, confidence, className }, ...] in video pixels.
+ */
+function _drawDetectionBoxes(ctx, detections, scale, offX, offY, cw, ch) {
+  const nails = detections.filter(d => d.className === "nail");
+  const skins = detections.filter(d => d.className === "skin");
+
+  // ── Skin boxes: dim dashed outline ──
+  ctx.save();
+  ctx.setLineDash([4, 4]);
+  ctx.strokeStyle = "rgba(147, 197, 253, 0.40)";
+  ctx.lineWidth = 1.5;
+  for (const d of skins) {
+    ctx.strokeRect(d.x * scale + offX, d.y * scale + offY, d.w * scale, d.h * scale);
+  }
+  ctx.restore();
+
+  // ── Nail boxes: prominent green ──
+  ctx.save();
+  ctx.setLineDash([]);
+  ctx.lineCap = "round";
+  for (const d of nails) {
+    const dx = d.x * scale + offX;
+    const dy = d.y * scale + offY;
+    const dw = d.w * scale;
+    const dh = d.h * scale;
+    const pct = Math.round(d.confidence * 100);
+
+    // Translucent fill
+    ctx.fillStyle = "rgba(52, 211, 153, 0.08)";
+    ctx.fillRect(dx, dy, dw, dh);
+
+    // Box outline
+    ctx.strokeStyle = "#34d399";
+    ctx.lineWidth = 2;
+    ctx.strokeRect(dx, dy, dw, dh);
+
+    // Corner bracket marquees
+    const bk = Math.min(14, dw * 0.22, dh * 0.22);
+    ctx.strokeStyle = "#6ee7b7";
+    ctx.lineWidth = 2.5;
+    // TL
+    ctx.beginPath(); ctx.moveTo(dx,        dy + bk); ctx.lineTo(dx,        dy);        ctx.lineTo(dx + bk,        dy);        ctx.stroke();
+    // TR
+    ctx.beginPath(); ctx.moveTo(dx + dw - bk, dy);        ctx.lineTo(dx + dw,   dy);        ctx.lineTo(dx + dw,   dy + bk);        ctx.stroke();
+    // BL
+    ctx.beginPath(); ctx.moveTo(dx,        dy + dh - bk); ctx.lineTo(dx,        dy + dh); ctx.lineTo(dx + bk,        dy + dh); ctx.stroke();
+    // BR
+    ctx.beginPath(); ctx.moveTo(dx + dw - bk, dy + dh);   ctx.lineTo(dx + dw,   dy + dh); ctx.lineTo(dx + dw,   dy + dh - bk); ctx.stroke();
+
+    // Confidence label badge just above (or below) the box
+    const lbl = `Nail \u00b7 ${pct}%`;
+    ctx.font = "bold 12px Inter, sans-serif";
+    const tw = ctx.measureText(lbl).width;
+    const bW = tw + 12;
+    const bH = 20;
+    const bx = dx;
+    const by = dy > bH + 4 ? dy - bH - 4 : dy + dh + 4;
+    ctx.fillStyle = "#065f46";
+    ctx.beginPath();
+    _rrect(ctx, bx, by, bW, bH, 4);
+    ctx.fill();
+    ctx.fillStyle = "#6ee7b7";
+    ctx.fillText(lbl, bx + 6, by + bH - 5);
+  }
+  ctx.restore();
+
+  // ── Status badge — top-right corner ──
+  const statusLabel = nails.length > 0
+    ? (nails.length === 1 ? "\u2713 Nail detected" : `\u2713 ${nails.length} nails`)
+    : "No nail detected";
+  const statusBg = nails.length > 0 ? "rgba(5, 78, 50, 0.88)"   : "rgba(120, 20, 20, 0.80)";
+  const statusFg = nails.length > 0 ? "#6ee7b7"                  : "#fca5a5";
+
+  ctx.save();
+  ctx.font = "bold 13px Inter, sans-serif";
+  const sbw = ctx.measureText(statusLabel).width + 20;
+  const sbh = 26;
+  const sbx = cw - sbw - 10;
+  const sby = 10;
+  ctx.fillStyle = statusBg;
+  ctx.beginPath();
+  _rrect(ctx, sbx, sby, sbw, sbh, 6);
+  ctx.fill();
+  ctx.fillStyle = statusFg;
+  ctx.fillText(statusLabel, sbx + 10, sby + 18);
+  ctx.restore();
 }
 
 
@@ -461,6 +669,7 @@ async function loadModel() {
       startCamera().then(() => {
         checkFlashSupport();
         startLightMonitor();
+        startLiveDetect();
       });
     }, 600);
 
@@ -1336,9 +1545,11 @@ $switchBtn.addEventListener("click", () => {
   $flashBtn.classList.remove("flash-on");
   hideLowLightBanner();
   setInstructionMode("camera");
+  stopLiveDetect();
   startCamera().then(() => {
     checkFlashSupport();
     startLightMonitor();
+    startLiveDetect();
   });
 });
 

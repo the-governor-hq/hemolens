@@ -407,6 +407,17 @@ html, body {
   pointer-events: none;
 }
 
+.detect-canvas {
+  display: block;
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 3;
+}
+
 .guide-overlay {
   position: absolute;
   inset: 0;
