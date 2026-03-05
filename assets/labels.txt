@@ -1,8 +1,10 @@
-# HemoLens severity labels (WHO classification)
+# HemoLens severity labels (simplified WHO-based classification)
+# General-population thresholds used in code (not sex/age-specific).
+# Real WHO guidelines (2011, NMH/NHD/MNM/11.1) define sex- and age-specific
+# cutoffs. These simplified bins are for screening context only.
+#
 # Format: threshold_low,threshold_high,label
-0.0,7.0,severe_anemia
-7.0,10.0,moderate_anemia
-10.0,12.0,mild_anemia_female
-10.0,13.0,mild_anemia_male
-12.0,20.0,normal_female
-13.0,20.0,normal_male
+0.0,8.0,severe_anemia
+8.0,11.0,moderate_anemia
+11.0,13.0,mild_anemia
+13.0,20.0,normal

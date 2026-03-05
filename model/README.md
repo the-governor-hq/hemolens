@@ -4,7 +4,11 @@ PyTorch training pipeline for the HemoLens regression model with TFLite export.
 
 Supports any timm backbone — default edge config uses **MobileNetV4-Conv-Small** (~2.5M params, ~2.5 MB INT8).
 
-The primary approach is a **hybrid pipeline**: frozen pretrained backbone as feature extractor + CatBoost/Ridge regression head. This significantly outperforms end-to-end fine-tuning in the small-data regime (250 patients). Best test MAE = **1.305 g/dL** (R² = 0.46).
+The primary approach is a **hybrid pipeline**: frozen pretrained backbone as feature extractor + CatBoost/Ridge regression head. This outperforms end-to-end fine-tuning by ~2× in the small-data regime (250 patients).
+
+- Best holdout test MAE = **1.305 g/dL** (38 test patients, 3 sessions — likely optimistic)
+- **3-fold session-aware CV MAE = 1.91 ± 0.27 g/dL** (CV R² < 0 — more honest generalizable estimate)
+- Deployed web model (CNN-only Ridge, no color features): test MAE ≈ 1.52 g/dL
 
 ## Files
 
@@ -40,6 +44,8 @@ python train.py --config configs/mobilenet_edge.yaml
 
 ## Results
 
+> **Note:** Test metrics are from a 38-patient holdout (3 sessions). The small test set means these numbers are noisy. Cross-validation gives a more honest estimate.
+
 ### Hybrid Models (MobileNetV4-Conv-Small backbone)
 
 | Head | Val MAE | Test MAE | Test R² | CV MAE (3-fold) |
@@ -51,6 +57,17 @@ python train.py --config configs/mobilenet_edge.yaml
 | ElasticNet | 1.645 | 1.541 | 0.356 | — |
 | CNN-only Ridge (edge) | 1.501 | 1.525 | 0.408 | — |
 | End-to-end fine-tuned | 2.891 | — | -1.61 | — |
+
+**Per-severity test MAE (CatBoost, 38 patients):**
+
+| Severity | n | Test MAE (g/dL) |
+|----------|---|------------------|
+| Severe (<8) | 3 | 3.932 |
+| Moderate (8–11) | 3 | 1.139 |
+| Mild (11–13) | 13 | 0.695 |
+| Normal (≥13) | 19 | 1.334 |
+
+**Cross-validation:** 3-fold session-aware CV (Ridge on train+val, 17 session groups): MAE = 1.91 ± 0.27 g/dL, R² < 0 (model does not outperform predicting the mean under CV).
 
 ### Backbone Sweep
 
@@ -79,3 +96,12 @@ Input (224×224×3)
 - 3-fold session-aware cross-validation (17 session groups)
 - Frozen backbone: no fine-tuning → eliminates overfitting on small data
 - End-to-end ONNX export: backbone + linear head in one model
+- **Deployed web model uses CNN-only Ridge** (color features not available on-device) — weaker than offline CatBoost
+
+## Limitations
+
+- **250 patients, single center** — too small for medical ML; results may not generalize
+- **Severe anemia MAE ≈ 3.9 g/dL** — unreliable on the most clinically critical cases
+- **CV R² < 0** — the model does not reliably outperform predicting the population mean under cross-validation
+- **Val R² ≈ 0.09 vs test R² = 0.46** — the gap suggests a lucky test split, not robust generalization
+- **WHO severity bins** in code use general thresholds (8/11/13 g/dL); real guidelines are sex- and age-specific

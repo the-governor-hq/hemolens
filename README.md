@@ -1,11 +1,13 @@
 # HemoLens 🔬
 
-**A high-performance, on-device pipeline for non-invasive hemoglobin level estimation.**
+**An experimental, on-device pipeline for non-invasive hemoglobin level estimation.**
 
-Powered by a hybrid pipeline: frozen MobileNetV4-Conv-Small features + a tabular regressor, using the 2024 Yakimov et al. fingernail dataset.
+Powered by a hybrid pipeline: frozen MobileNetV4-Conv-Small features + a tabular regressor, using the 2024 Yakimov et al. fingernail dataset (250 patients, single center).
 
-- Best *offline hybrid* result (CNN features + color features + CatBoost): test MAE = **1.305 g/dL** (R² = 0.46)
-- Deployed *web* model (ONNX, CNN-only Ridge head): test MAE ≈ **1.52 g/dL** when averaging the 3 nail crops per patient (training-like), and ≈ **1.88–1.91 g/dL** on single crops (web-like)
+- **Cross-validated MAE: 1.91 ± 0.27 g/dL** (3-fold session-aware CV, 17 session groups) — the most honest generalizable estimate
+- Best *offline hybrid* holdout result (CNN + color features + CatBoost): test MAE = 1.305 g/dL on 38 patients (3 test sessions — likely optimistic)
+- Deployed *web* model (ONNX, CNN-only Ridge head): test MAE ≈ 1.52 g/dL when averaging 3 crops per patient, ≈ 1.88–1.91 g/dL on single crops
+- **Severe anemia detection is unreliable** — test MAE = 3.93 g/dL on severe cases (n=3)
 
 The web demo uses **multi-frame inference** (30 captures with IQR outlier rejection and median aggregation) to reduce single-frame noise.
 
@@ -44,6 +46,8 @@ HemoLens estimates hemoglobin (Hb) levels from smartphone camera images of finge
 
 ## Deep Learning Results
 
+> **Important context:** Test metrics are from a 38-patient holdout (3 sessions). The small test set and limited session diversity mean these numbers are noisy. Cross-validation (CV) gives a more honest — and notably worse — performance estimate. The CV R² is negative, meaning the model does not reliably outperform predicting the population mean under session-aware cross-validation.
+
 ### Best Model: MobileNetV4-Conv-Small + CatBoost (Hybrid)
 
 | Approach | Val MAE (g/dL) | Test MAE (g/dL) | Test R² | CV MAE (3-fold) |
@@ -55,6 +59,15 @@ HemoLens estimates hemoglobin (Hb) levels from smartphone camera images of finge
 | CNN-only Ridge (no color feats) | 1.501 | 1.525 | 0.408 | — |
 | End-to-end fine-tuned MobileNetV4 | 2.891 | — | -1.61 | — |
 
+**Per-severity test MAE (CatBoost, n = 38 patients):**
+
+| Severity | n | Test MAE (g/dL) |
+|----------|---|------------------|
+| Severe (<8) | 3 | 3.932 |
+| Moderate (8–11) | 3 | 1.139 |
+| Mild (11–13) | 13 | 0.695 |
+| Normal (≥13) | 19 | 1.334 |
+
 ### Backbone Sweep (4 Backbones × 4 Heads)
 
 | Backbone | Best Head | Test MAE | Test R² | CV MAE |
@@ -64,16 +77,16 @@ HemoLens estimates hemoglobin (Hb) levels from smartphone camera images of finge
 | tf_efficientnetv2_b0 | Ridge+PCA32 | 1.497 | 0.469 | 1.563 ± 0.32 |
 | mobilenetv3_small_100 | CatBoost | 1.444 | 0.399 | 1.612 ± 0.29 |
 
-The hybrid frozen-backbone approach beats end-to-end fine-tuning by >2× on this 250-patient dataset. EfficientNet-B0 has the best cross-validation stability.
+The hybrid frozen-backbone approach beats end-to-end fine-tuning by ~2× on this 250-patient dataset. EfficientNet-B0 has the best cross-validation stability.
 
 ## Key Features
 
 - **Multi-frame inference**: Captures 30 frames at ~12.5 fps, rejects outliers via IQR, takes the median — significantly more robust than single-shot prediction.
 - **Client-side inference**: Hb estimation runs in the browser; the demo is hosted as static files (runtime assets may be loaded from CDN unless bundled).
 - **Privacy-preserving**: No images are ever uploaded; everything stays in the browser.
-- **Lightweight model**: Frozen MobileNetV4-Conv-Small backbone (~2.5M params) + CatBoost head.
+- **Lightweight model**: Frozen MobileNetV4-Conv-Small backbone (~2.5M params) + Ridge head for web deployment.
 - **Web-ready**: ONNX Runtime Web (WASM) — works in any modern browser with a camera.
-- **World-class UX**: Anatomical SVG finger guide, circular progress ring during scanning, live prediction scatter strip, outlier visualization, flash/torch toggle, and result confidence statistics (std dev, range, frames used).
+- **Polished demo UX**: Anatomical SVG finger guide, circular progress ring during scanning, live prediction scatter strip, outlier visualization, flash/torch toggle, and result confidence statistics (std dev, range, frames used).
 
 ## Dataset
 
@@ -126,8 +139,9 @@ Input (224×224×3)
 - 3 nail crops per patient averaged to one 1280-dim feature vector
 - 67 handcrafted color features (RGB/LAB/HSV mean, std, median, P5, P95 + redness index) → 1347-dim input
 - Session-aware splits (GroupShuffleSplit on measurement date) to prevent leakage
-- 3-fold session-aware cross-validation: **MAE = 1.912 ± 0.27 g/dL** (17 session groups)
-- End-to-end ONNX export (backbone + head) for edge deployment
+- 3-fold session-aware cross-validation: **MAE = 1.912 ± 0.27 g/dL** (17 session groups, CV R² < 0)
+- End-to-end ONNX export (backbone + Ridge head) for edge deployment
+- **Note:** The deployed web model uses CNN-only Ridge (no color features), which is weaker than the offline CatBoost+color model
 
 **Multi-frame inference pipeline (web demo):**
 
@@ -140,6 +154,16 @@ Capture button pressed
   → Median of remaining predictions → final Hb estimate
   → Display with confidence stats (std dev, range, frames used)
 ```
+
+## ⚠️ Limitations
+
+- **Tiny dataset**: 250 patients from a single center. Results may not generalize to other populations, skin tones, cameras, or lighting conditions.
+- **Severe anemia detection is unreliable**: The model's error on severe cases (Hb < 8 g/dL) is ~4 g/dL — this is the most clinically important class and the model fails on it.
+- **CV R² is negative**: Under session-aware cross-validation, the model does not reliably outperform predicting the population mean. The favorable holdout test R² (0.46) likely reflects a lucky 3-session test split.
+- **Train/deploy gap**: The best offline model (CatBoost + color features) cannot run in the browser. The deployed web model (CNN-only Ridge) is weaker.
+- **Multi-frame reduces variance, not bias**: If the model systematically mispredicts under certain conditions, 30 frames will converge to the wrong answer with high confidence.
+- **No true uncertainty estimation**: The reported confidence stats (std dev, range) measure inter-frame consistency, not prediction accuracy.
+- **WHO severity bins**: The code uses general-population thresholds (8/11/13 g/dL). Real WHO guidelines are sex- and age-specific.
 
 ## ⚠️ Disclaimer
 
