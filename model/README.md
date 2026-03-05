@@ -4,15 +4,17 @@ PyTorch training pipeline for the HemoLens regression model with TFLite export.
 
 Supports any timm backbone — default edge config uses **MobileNetV4-Conv-Small** (~2.5M params, ~2.5 MB INT8).
 
-The primary approach is a **hybrid pipeline**: frozen pretrained backbone as feature extractor + Ridge regression head. This significantly outperforms end-to-end fine-tuning in the small-data regime (250 patients).
+The primary approach is a **hybrid pipeline**: frozen pretrained backbone as feature extractor + CatBoost/Ridge regression head. This significantly outperforms end-to-end fine-tuning in the small-data regime (250 patients). Best test MAE = **1.305 g/dL** (R² = 0.46).
 
 ## Files
 
 | File | Description |
 |------|-------------|
-| `prepare_dataset.py` | Crop nail ROIs from raw photos → `data/processed/nail_crops/` |
+| `prepare_dataset.py` | Crop nail ROIs, session-aware splits → `data/processed/` |
 | `train_hybrid.py` | **Recommended** — Frozen backbone feature extraction + Ridge/MLP |
 | `train.py` | End-to-end fine-tuning with progressive unfreezing (for comparison) |
+| `sweep_hybrid.py` | Backbone × head grid search (4 backbones × 4 heads) |
+| `extract_color_features.py` | Extract 67 color features per patient |
 | `export_hybrid.py` | Export hybrid model to ONNX (backbone + Ridge head) |
 | `export_tflite.py` | Convert PyTorch checkpoint → ONNX → TFLite (INT8/FP16) |
 | `dataset.py` | Custom `Dataset` class for fingernail images + Hb labels |
@@ -38,27 +40,42 @@ python train.py --config configs/mobilenet_edge.yaml
 
 ## Results
 
-| Approach | Val MAE | Test MAE | Val R² | CV MAE |
-|----------|---------|----------|--------|--------|
-| **Hybrid (frozen CNN + color → Ridge)** | **1.690** | **1.365** | **0.483** | **1.656 ± 0.18** |
-| Ridge+PCA128 | 1.717 | 1.402 | 0.485 | — |
-| ElasticNet | 1.909 | 1.406 | 0.377 | — |
-| End-to-end fine-tuned | 2.315 | — | 0.143 | — |
+### Hybrid Models (MobileNetV4-Conv-Small backbone)
+
+| Head | Val MAE | Test MAE | Test R² | CV MAE (3-fold) |
+|------|---------|----------|---------|------------------|
+| **CatBoost** | **1.520** | **1.305** | **0.460** | 1.912 ± 0.27 |
+| Ridge | 1.566 | 1.459 | 0.431 | — |
+| Ridge+PCA128 | 1.563 | 1.453 | 0.436 | — |
+| Ridge+PCA32 | 1.545 | 1.527 | 0.411 | — |
+| ElasticNet | 1.645 | 1.541 | 0.356 | — |
+| CNN-only Ridge (edge) | 1.501 | 1.525 | 0.408 | — |
+| End-to-end fine-tuned | 2.891 | — | -1.61 | — |
+
+### Backbone Sweep
+
+| Backbone | Best Head | Test MAE | Test R² | CV MAE |
+|----------|-----------|----------|---------|--------|
+| **mobilenetv4_conv_small** | **CatBoost** | **1.305** | **0.460** | 1.912 ± 0.27 |
+| efficientnet_b0 | CatBoost | 1.459 | 0.431 | **1.527 ± 0.32** |
+| tf_efficientnetv2_b0 | Ridge+PCA32 | 1.497 | 0.469 | 1.563 ± 0.32 |
+| mobilenetv3_small_100 | CatBoost | 1.444 | 0.399 | 1.612 ± 0.29 |
 
 ## Architecture (Edge — Hybrid)
 
 ```
 Input (224×224×3)
   → MobileNetV4-Conv-Small (frozen pretrained, timm) → Global Pool → [1280-dim]
-  → Ridge Regression (sklearn, exported as Linear(1280→1))
+  → CatBoost / Ridge Regression
   → Hb (g/dL)
 ```
 
 ## Training Strategy (Small-Data Regime)
 
 - **250 patients**, 3 nail crops each → averaged to patient-level 1280-dim CNN features
-- 51 handcrafted color features (RGB, LAB, HSV) concatenated → 1331-dim
-- Ridge regression with 5-fold cross-validation (α selected via RidgeCV)
-- Patient-level stratified splits (70/15/15) to prevent leakage
+- 67 handcrafted color features (RGB/LAB/HSV mean, std, median, P5, P95 + redness index) → 1347-dim
+- CatBoost regression (best) or Ridge with RidgeCV α-selection
+- Session-aware splits (GroupShuffleSplit on measurement date, 20 sessions) to prevent leakage
+- 3-fold session-aware cross-validation (17 session groups)
 - Frozen backbone: no fine-tuning → eliminates overfitting on small data
 - End-to-end ONNX export: backbone + linear head in one model

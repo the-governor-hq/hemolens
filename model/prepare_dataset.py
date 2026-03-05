@@ -139,7 +139,7 @@ def prepare(val_size: float = 0.15, test_size: float = 0.15):
         if leaked:
             print(f"  WARNING: {len(leaked)} sessions leak between {s1} and {s2}!")
         else:
-            print(f"  ✓ No session leakage between {s1}/{s2}")
+            print(f"  OK: No session leakage between {s1}/{s2}")
 
     # ------------------------------------------------------------------
     # 3. Save metadata CSV
@@ -157,7 +157,7 @@ def prepare(val_size: float = 0.15, test_size: float = 0.15):
         hb_range = f"[{subset['hb_value'].min():.1f}, {subset['hb_value'].max():.1f}]"
         print(f"  {split:5s}: {n_patients:3d} patients, {n_images:3d} images, Hb {hb_range} g/dL")
 
-    print(f"\nSaved → {output_csv}")
+    print(f"\nSaved -> {output_csv}")
     return crop_df
 
 

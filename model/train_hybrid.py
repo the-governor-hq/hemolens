@@ -176,7 +176,7 @@ def build_patient_features(
     Returns dict with train/val/test splits (including session IDs for CV grouping).
     """
     unique_pids = np.unique(patient_ids)
-    print(f"\nAggregating {len(cnn_features)} crops → {len(unique_pids)} patients")
+    print(f"\nAggregating {len(cnn_features)} crops -> {len(unique_pids)} patients")
 
     # Average crops per patient
     patient_cnn = {}
@@ -395,7 +395,7 @@ def cross_validate_best(data: dict, n_splits: int = 5) -> dict:
     std_mae = np.std(fold_maes)
     mean_r2 = np.mean(fold_r2s)
 
-    print(f"\n  CV MAE: {mean_mae:.3f} ± {std_mae:.3f} g/dL")
+    print(f"\n  CV MAE: {mean_mae:.3f} +/- {std_mae:.3f} g/dL")
     print(f"  CV R²:  {mean_r2:.4f}")
 
     return {"cv_mae_mean": float(mean_mae), "cv_mae_std": float(std_mae), "cv_r2_mean": float(mean_r2)}
@@ -467,7 +467,7 @@ def export_pytorch_model(
         "cnn_dim": cnn_dim,
         "ridge_alpha": float(ridge.alpha_) if hasattr(ridge, "alpha_") else None,
     }, save_path)
-    print(f"\nSaved end-to-end model → {save_path}")
+    print(f"\nSaved end-to-end model -> {save_path}")
 
     # Also save ONNX for TFLite conversion
     dummy = torch.randn(1, 3, 224, 224)
@@ -479,7 +479,7 @@ def export_pytorch_model(
         opset_version=13,
         dynamic_axes={"image": {0: "batch"}, "hb_prediction": {0: "batch"}},
     )
-    print(f"Saved ONNX → {onnx_path}")
+    print(f"Saved ONNX -> {onnx_path}")
 
     return model
 
@@ -535,8 +535,8 @@ def main():
     # Step 3: Train & evaluate
     results, best_name, best_model = train_and_evaluate(data)
 
-    # Step 4: Cross-validation
-    cv_results = cross_validate_best(data)
+    # Step 4: Cross-validation (3-fold for 17-20 session groups)
+    cv_results = cross_validate_best(data, n_splits=3)
 
     # Save results
     save_dir = Path(cfg["logging"]["save_dir"])
@@ -546,7 +546,7 @@ def main():
     results_path = save_dir / "hybrid_results.json"
     with open(results_path, "w") as f:
         json.dump(all_results, f, indent=2)
-    print(f"\nResults saved → {results_path}")
+    print(f"\nResults saved -> {results_path}")
 
     # Step 5: Export for TFLite (CNN-only head for edge)
     # IMPORTANT: The exported edge model uses ONLY CNN features — color features
@@ -589,7 +589,7 @@ def main():
             save_dir,
         )
 
-    print("\n✓ Done.")
+    print("\nDone.")
 
 
 if __name__ == "__main__":

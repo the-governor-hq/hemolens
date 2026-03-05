@@ -286,7 +286,7 @@ def main():
     # Label noise for regularization
     label_noise_std = train_cfg.get("label_noise_std", 0.0)
     if label_noise_std > 0:
-        print(f"Label noise: σ={label_noise_std:.2f} g/dL")
+        print(f"Label noise: std={label_noise_std:.2f} g/dL")
 
     # Loss
     loss_cfg = cfg["loss"]
@@ -411,7 +411,7 @@ def main():
                 },
                 ckpt_path,
             )
-            print(f"Saved best model → {ckpt_path} (MAE={best_mae:.3f})")
+            print(f"Saved best model -> {ckpt_path} (MAE={best_mae:.3f})")
         else:
             patience_counter += 1
             print(f"No improvement ({patience_counter}/{train_cfg['early_stopping_patience']})")

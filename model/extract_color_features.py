@@ -163,7 +163,7 @@ def main():
 
     output_path = OUTPUT_DIR / "color_features.csv"
     features_df.to_csv(output_path, index=False)
-    print(f"Saved → {output_path}")
+    print(f"Saved -> {output_path}")
 
 
 if __name__ == "__main__":
