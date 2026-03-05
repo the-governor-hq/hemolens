@@ -13,6 +13,7 @@
 // ─── Configuration ───
 
 const MODEL_PATH = "model/hemolens_hybrid_web.onnx";
+const DETECTOR_PATH = "model/nail_detector.onnx";
 const INPUT_SIZE = 224;
 const IMAGENET_MEAN = [0.485, 0.456, 0.406];
 const IMAGENET_STD  = [0.229, 0.224, 0.225];
@@ -108,6 +109,8 @@ const $debugFramesGrid = document.getElementById("debugFramesGrid");
 // ─── State ───
 
 let session = null;          // ONNX Runtime inference session
+let nailDetector = null;     // NailDetector instance (YOLOv8-nano)
+let detectorAvailable = false; // whether nail_detector.onnx loaded successfully
 let currentStream = null;    // MediaStream
 let facingMode = "environment";  // prefer rear camera
 let isProcessing = false;
@@ -120,13 +123,25 @@ let lowLightDismissed = false; // user dismissed the banner this session
 // ─── Instruction Text ───
 
 const INSTRUCTIONS = {
-  camera: "Place one fingernail inside the frame — fill the box as much as possible",
-  upload: "Uploaded image mode — analyzing one photo. Use a sharp, well-lit close-up of one fingernail.",
+  camera: detectorAvailable
+    ? "Point camera at your hand — nails will be detected automatically"
+    : "Place one fingernail inside the frame — fill the box as much as possible",
+  cameraDetector: "Point camera at your hand — nails will be detected automatically",
+  cameraManual: "Place one fingernail inside the frame — fill the box as much as possible",
+  upload: "Uploaded image — nails will be detected automatically. Use a well-lit photo of your hand.",
+  uploadManual: "Uploaded image mode — analyzing one photo. Use a sharp, well-lit close-up of one fingernail.",
 };
 
 function setInstructionMode(mode) {
   if (!$instructionText) return;
-  const txt = INSTRUCTIONS[mode] || INSTRUCTIONS.camera;
+  let txt;
+  if (mode === "camera") {
+    txt = detectorAvailable ? INSTRUCTIONS.cameraDetector : INSTRUCTIONS.cameraManual;
+  } else if (mode === "upload") {
+    txt = detectorAvailable ? INSTRUCTIONS.upload : INSTRUCTIONS.uploadManual;
+  } else {
+    txt = INSTRUCTIONS.cameraManual;
+  }
   $instructionText.textContent = txt;
 }
 
@@ -138,8 +153,16 @@ const LOW_LIGHT_LUMA_THRESHOLD = 0.13; // mean luma below this => warn
 const LOW_LIGHT_CONSEC_NEEDED  = 2;    // consecutive low readings before showing banner
 let   _lowLightConsec = 0;             // rolling counter
 
-/** Sample a centre crop from the live video feed and return mean luma [0-1]. */
-function sampleVideoLuma() {
+// Training-data photo profile (from analyze_training_photos.py)
+// Used to give the user a live quality indicator
+const TRAINING_PROFILE = {
+  luma:   { min: 0.55, max: 0.76 },   // nail crop luma [0-1] P5-P95 (142-194 /255)
+  rbRatio:{ min: 1.18, max: 1.49 },   // R/B channel ratio — warm neutral light
+  sat:    { min: 0.16, max: 0.33 },   // saturation [0-1] P5-P95 (41-85 /255)
+};
+
+/** Sample a centre crop from the live video feed and return luma + color stats. */
+function sampleVideoStats() {
   if (!$video || $video.readyState < 2 || !$video.videoWidth) return null;
 
   // Sample a small 64×64 centre crop for speed
@@ -156,8 +179,27 @@ function sampleVideoLuma() {
   ctx.drawImage($video, sx, sy, size, size, 0, 0, size, size);
 
   const imgData = ctx.getImageData(0, 0, size, size);
-  const stats = computeLumaStats(imgData);
-  return stats.mean;
+  const lumaStats = computeLumaStats(imgData);
+
+  // Also compute R/B ratio and saturation from the sampled patch
+  const d = imgData.data;
+  const n = imgData.width * imgData.height;
+  let rSum = 0, gSum = 0, bSum = 0, satSum = 0;
+  for (let i = 0; i < n; i++) {
+    const r = d[i * 4], g = d[i * 4 + 1], b = d[i * 4 + 2];
+    rSum += r; gSum += g; bSum += b;
+    const mx = Math.max(r, g, b);
+    const mn = Math.min(r, g, b);
+    satSum += (mx === 0) ? 0 : (mx - mn) / mx;
+  }
+  const rMean = rSum / n;
+  const bMean = bSum / n;
+
+  return {
+    mean: lumaStats.mean,
+    rbRatio: bMean > 0 ? rMean / bMean : 1,
+    saturation: satSum / n,
+  };
 }
 
 /** Start periodic light level checks on the camera feed. */
@@ -171,10 +213,11 @@ function startLightMonitor() {
     if (isProcessing || !$resultSection.classList.contains("hidden")) return;
     if (lowLightDismissed) return;
 
-    const luma = sampleVideoLuma();
-    if (luma === null) return;
+    const stats = sampleVideoStats();
+    if (stats === null) return;
 
-    if (luma < LOW_LIGHT_LUMA_THRESHOLD) {
+    // Low-light detection
+    if (stats.mean < LOW_LIGHT_LUMA_THRESHOLD) {
       _lowLightConsec++;
       if (_lowLightConsec >= LOW_LIGHT_CONSEC_NEEDED) {
         showLowLightBanner();
@@ -183,6 +226,9 @@ function startLightMonitor() {
       _lowLightConsec = 0;
       hideLowLightBanner();
     }
+
+    // Live quality indicator
+    updateLightingQuality(stats);
   }, LIGHT_CHECK_INTERVAL_MS);
 }
 
@@ -190,6 +236,46 @@ function stopLightMonitor() {
   if (lightMonitorId !== null) {
     clearInterval(lightMonitorId);
     lightMonitorId = null;
+  }
+}
+
+/** Update the live lighting quality indicator chip. */
+function updateLightingQuality(stats) {
+  const $indicator = document.getElementById("lightingQuality");
+  if (!$indicator) return;
+
+  const issues = [];
+
+  // Brightness check against training profile
+  if (stats.mean < TRAINING_PROFILE.luma.min) {
+    issues.push("too dark");
+  } else if (stats.mean > TRAINING_PROFILE.luma.max) {
+    issues.push("too bright");
+  }
+
+  // Color temperature check (R/B ratio)
+  if (stats.rbRatio < TRAINING_PROFILE.rbRatio.min) {
+    issues.push("too blue/cool");
+  } else if (stats.rbRatio > TRAINING_PROFILE.rbRatio.max) {
+    issues.push("too warm/yellow");
+  }
+
+  // Saturation check
+  if (stats.saturation < TRAINING_PROFILE.sat.min) {
+    issues.push("low color");
+  } else if (stats.saturation > TRAINING_PROFILE.sat.max) {
+    issues.push("oversaturated");
+  }
+
+  if (issues.length === 0) {
+    $indicator.textContent = "✓ Lighting looks good";
+    $indicator.className = "lighting-quality quality-good";
+  } else if (issues.length === 1) {
+    $indicator.textContent = "⚠ " + issues[0];
+    $indicator.className = "lighting-quality quality-warn";
+  } else {
+    $indicator.textContent = "✗ " + issues.slice(0, 2).join(", ");
+    $indicator.className = "lighting-quality quality-bad";
   }
 }
 
@@ -274,7 +360,7 @@ function resetForNewCapture() {
   $scanFrameNum.textContent = "0";
   $scanRingProgress.style.strokeDashoffset = 2 * Math.PI * 52;
   $scanOverlay.classList.add("hidden");
-  $guideOverlay.style.opacity = "";
+  if ($guideOverlay) $guideOverlay.style.opacity = "";
 
   // Reset debug UI
   if ($debugFramesGrid) $debugFramesGrid.innerHTML = "";
@@ -324,25 +410,38 @@ async function loadModel() {
     // Single-threaded to avoid SharedArrayBuffer / COOP/COEP requirements
     ort.env.wasm.numThreads = 1;
 
-    updateSplash("Downloading model (~10 MB)...", 25);
+    updateSplash("Downloading Hb model (~10 MB)...", 20);
 
-    // Fetch model as ArrayBuffer for reliable loading
+    // Fetch Hb model as ArrayBuffer for reliable loading
     const response = await fetch(MODEL_PATH);
     if (!response.ok) {
       throw new Error("Model fetch failed: HTTP " + response.status);
     }
     const modelBuffer = await response.arrayBuffer();
-    console.log("Model downloaded:", modelBuffer.byteLength, "bytes");
+    console.log("Hb model downloaded:", modelBuffer.byteLength, "bytes");
 
-    updateSplash("Loading inference engine...", 60);
+    updateSplash("Loading Hb inference engine...", 50);
 
     session = await ort.InferenceSession.create(modelBuffer, {
       executionProviders: ["wasm"],
       graphOptimizationLevel: "all",
     });
 
-    console.log("Session created. Inputs:", session.inputNames, "Outputs:", session.outputNames);
-    updateSplash("Model loaded!", 100);
+    console.log("Hb session created. Inputs:", session.inputNames, "Outputs:", session.outputNames);
+
+    // Try loading the nail detector (non-blocking — fallback to guide overlay if absent)
+    updateSplash("Loading nail detector...", 70);
+    try {
+      nailDetector = new NailDetector({ confThreshold: 0.35, iouThreshold: 0.45 });
+      await nailDetector.load(DETECTOR_PATH);
+      detectorAvailable = true;
+      console.log("[NailDetector] Loaded successfully — auto-detection enabled");
+    } catch (detErr) {
+      console.warn("[NailDetector] Not available, falling back to manual guide overlay:", detErr.message);
+      detectorAvailable = false;
+    }
+
+    updateSplash("Ready!", 100);
 
     // Short delay so user sees the success state
     await sleep(600);
@@ -353,6 +452,12 @@ async function loadModel() {
       $splash.classList.add("hidden");
       $app.classList.remove("hidden");
       initDebugControls();
+
+      // Hide the guide overlay if detector is available
+      if (detectorAvailable && $guideOverlay) {
+        $guideOverlay.style.display = "none";
+      }
+
       startCamera().then(() => {
         checkFlashSupport();
         startLightMonitor();
@@ -482,6 +587,48 @@ function grabNailFrame(crop) {
   // Match training/val preprocessing:
   // Resize (shorter side = 256, preserve aspect) -> CenterCrop 224
   return preprocessCanvasToImageData($captureCanvas);
+}
+
+
+/** Grab full frame from video as ImageData (for nail detector) */
+function grabFullFrame() {
+  const vw = $video.videoWidth;
+  const vh = $video.videoHeight;
+  const canvas = document.createElement("canvas");
+  canvas.width = vw;
+  canvas.height = vh;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage($video, 0, 0, vw, vh);
+  return { canvas, imageData: ctx.getImageData(0, 0, vw, vh), width: vw, height: vh };
+}
+
+
+/** Crop a detected nail bounding box from a canvas, preprocess for Hb model */
+function cropDetectedNail(srcCanvas, detection) {
+  // Add 10% padding around the detection box
+  const pad = 0.10;
+  const px = Math.max(0, Math.round(detection.x - detection.w * pad));
+  const py = Math.max(0, Math.round(detection.y - detection.h * pad));
+  const pw = Math.min(Math.round(detection.w * (1 + 2 * pad)), srcCanvas.width - px);
+  const ph = Math.min(Math.round(detection.h * (1 + 2 * pad)), srcCanvas.height - py);
+
+  const cropCanvas = document.createElement("canvas");
+  cropCanvas.width = pw;
+  cropCanvas.height = ph;
+  const ctx = cropCanvas.getContext("2d");
+  ctx.drawImage(srcCanvas, px, py, pw, ph, 0, 0, pw, ph);
+
+  return preprocessCanvasToImageData(cropCanvas);
+}
+
+
+/** Pick the best nail detection from a list (highest confidence, class=nail) */
+function pickBestNail(detections) {
+  const nails = detections.filter(d => d.className === "nail");
+  if (nails.length === 0) return null;
+  // Pick the one with largest area × confidence product (prefer big, confident nails)
+  nails.sort((a, b) => (b.w * b.h * b.confidence) - (a.w * a.h * a.confidence));
+  return nails[0];
 }
 
 
@@ -709,8 +856,13 @@ async function captureMultiFrame() {
     return;
   }
 
-  const crop = getNailCropRect();
-  if (!crop) return;
+  // When detector is NOT available, fall back to guide overlay crop
+  const useDetector = detectorAvailable && nailDetector && nailDetector.isLoaded;
+  let crop = null;
+  if (!useDetector) {
+    crop = getNailCropRect();
+    if (!crop) return;
+  }
 
   isProcessing = true;
   scanAborted = false;
@@ -726,12 +878,13 @@ async function captureMultiFrame() {
   $scanFrameNum.textContent = "0";
   $scanRingProgress.style.strokeDashoffset = 2 * Math.PI * 52;
   $scanOverlay.classList.remove("hidden");
-  $guideOverlay.style.opacity = "0.3";
+  if ($guideOverlay) $guideOverlay.style.opacity = "0.3";
 
   const predictions = [];
   const frameTiles = []; // one per captured frame (including invalid)
   const predIdxToFrameIdx = []; // maps prediction index -> frame index
   let invalidFrames = 0;
+  let noDetectionFrames = 0; // frames where detector found no nails
   let lastPreviewCanvas = null;
 
   try {
@@ -741,8 +894,67 @@ async function captureMultiFrame() {
         break;
       }
 
-      // Grab frame
-      const imageData = grabNailFrame(crop);
+      let imageData;
+
+      if (useDetector) {
+        // ── Auto-detection path: detect nails, crop the best one ──
+        const frame = grabFullFrame();
+        const detections = await nailDetector.detect(frame.imageData, frame.width, frame.height);
+        const bestNail = pickBestNail(detections);
+
+        if (!bestNail) {
+          noDetectionFrames++;
+          updateScanUI(i + 1, MULTI_FRAME_COUNT, null);
+
+          // Create placeholder tile for debug
+          const placeholderData = new ImageData(INPUT_SIZE, INPUT_SIZE);
+          const dbg = $debugFramesGrid ? makeFrameTile(placeholderData, `#${i + 1} no nail`) : null;
+          const scan = $scanThumbs ? makeScanThumb(placeholderData, `no nail`) : null;
+          const tiles = { dbgTile: dbg?.tile, dbgLabel: dbg?.label, scanTile: scan?.tile, scanLabel: scan?.label };
+          frameTiles.push(tiles);
+          if (tiles.dbgTile) {
+            tiles.dbgTile.classList.add("invalid");
+            $debugFramesGrid.appendChild(tiles.dbgTile);
+          }
+          renderScanThumbStrip(frameTiles);
+
+          const framesLeft = (MULTI_FRAME_COUNT - 1) - i;
+          const maxPossible = predictions.length + framesLeft;
+          if (maxPossible < MIN_VALID_FRAMES) break;
+          if (i < MULTI_FRAME_COUNT - 1) await sleep(FRAME_INTERVAL_MS);
+          continue;
+        }
+
+        // Crop and preprocess the detected nail
+        imageData = cropDetectedNail(frame.canvas, bestNail);
+
+        // Save preview from best detection
+        if (!lastPreviewCanvas || i === Math.floor(MULTI_FRAME_COUNT / 2)) {
+          const pad = 0.10;
+          const px = Math.max(0, Math.round(bestNail.x - bestNail.w * pad));
+          const py = Math.max(0, Math.round(bestNail.y - bestNail.h * pad));
+          const pw = Math.min(Math.round(bestNail.w * (1 + 2 * pad)), frame.width - px);
+          const ph = Math.min(Math.round(bestNail.h * (1 + 2 * pad)), frame.height - py);
+          lastPreviewCanvas = document.createElement("canvas");
+          lastPreviewCanvas.width = pw;
+          lastPreviewCanvas.height = ph;
+          const pCtx = lastPreviewCanvas.getContext("2d");
+          pCtx.drawImage(frame.canvas, px, py, pw, ph, 0, 0, pw, ph);
+        }
+
+      } else {
+        // ── Manual guide overlay path (original behavior) ──
+        imageData = grabNailFrame(crop);
+
+        // Save a preview canvas from the first valid frame, then refine near the middle
+        if (!lastPreviewCanvas || i === Math.floor(MULTI_FRAME_COUNT / 2)) {
+          lastPreviewCanvas = document.createElement("canvas");
+          lastPreviewCanvas.width = crop.w;
+          lastPreviewCanvas.height = crop.h;
+          const pCtx = lastPreviewCanvas.getContext("2d");
+          pCtx.drawImage($captureCanvas, 0, 0);
+        }
+      }
 
       // Create debug tiles early (so invalid frames are also visible)
       const dbg = $debugFramesGrid ? makeFrameTile(imageData, `#${i + 1}`) : null;
@@ -777,15 +989,6 @@ async function captureMultiFrame() {
         continue;
       }
 
-      // Save a preview canvas from the first valid frame, then refine near the middle
-      if (!lastPreviewCanvas || i === Math.floor(MULTI_FRAME_COUNT / 2)) {
-        lastPreviewCanvas = document.createElement("canvas");
-        lastPreviewCanvas.width = crop.w;
-        lastPreviewCanvas.height = crop.h;
-        const pCtx = lastPreviewCanvas.getContext("2d");
-        pCtx.drawImage($captureCanvas, 0, 0);
-      }
-
       // Mini flash on each capture
       const mf = document.createElement("div");
       mf.className = "mini-flash";
@@ -795,7 +998,7 @@ async function captureMultiFrame() {
       // Run inference
       const hb = await inferSingle(imageData);
       predictions.push(hb);
-      predIdxToFrameIdx.push(i);
+      predIdxToFrameIdx.push(frameTiles.length - 1);
 
       if (tiles.dbgLabel) tiles.dbgLabel.textContent = `#${i + 1} ${hb.toFixed(1)}`;
       if (tiles.scanLabel) tiles.scanLabel.textContent = hb.toFixed(1);
@@ -817,8 +1020,10 @@ async function captureMultiFrame() {
     }
 
     if (predictions.length < MIN_VALID_FRAMES) {
-      const msg = invalidFrames >= MULTI_FRAME_COUNT
-        ? "No usable frames captured. Camera may be blocked/too dark/overexposed."
+      const msg = (invalidFrames + noDetectionFrames) >= MULTI_FRAME_COUNT
+        ? useDetector
+          ? "No nails detected in any frame. Make sure your fingernails are visible to the camera."
+          : "No usable frames captured. Camera may be blocked/too dark/overexposed."
         : `Too few usable frames (${predictions.length}/${MULTI_FRAME_COUNT}). Please hold steady and retry.`;
       alert(msg);
       return;
@@ -911,26 +1116,87 @@ async function processImage(sourceCanvas) {
   $scanLine.classList.remove("hidden");
 
   try {
-    const imageData = preprocessCanvasToImageData(sourceCanvas);
+    const useDetector = detectorAvailable && nailDetector && nailDetector.isLoaded;
 
-    const validity = isFrameValid(imageData);
-    if (!validity.ok) {
-      alert("This image looks unusable (too dark/bright or blank). Please upload a clearer nail photo.");
-      return;
+    if (useDetector) {
+      // ── Auto-detection path: detect nails, run inference on each ──
+      const w = sourceCanvas.width;
+      const h = sourceCanvas.height;
+      const ctx = sourceCanvas.getContext("2d");
+      const fullImageData = ctx.getImageData(0, 0, w, h);
+
+      const detections = await nailDetector.detect(fullImageData, w, h);
+      const nails = detections.filter(d => d.className === "nail");
+
+      if (nails.length === 0) {
+        alert("No fingernails detected in this image. Please upload a photo showing your fingernails clearly.");
+        return;
+      }
+
+      console.log(`[Upload] Detected ${nails.length} nail(s), running Hb inference on each...`);
+
+      // Run inference on each detected nail and average
+      const nailPredictions = [];
+      for (const nail of nails) {
+        const nailImageData = cropDetectedNail(sourceCanvas, nail);
+        const validity = isFrameValid(nailImageData);
+        if (!validity.ok) {
+          console.log(`[Upload] Nail at (${nail.x.toFixed(0)}, ${nail.y.toFixed(0)}) invalid, skipping`);
+          continue;
+        }
+        const hb = await inferSingle(nailImageData);
+        console.log(`[Upload] Nail conf=${nail.confidence.toFixed(2)} → Hb=${hb.toFixed(1)}`);
+        nailPredictions.push(hb);
+      }
+
+      if (nailPredictions.length === 0) {
+        alert("Detected nails were too dark/bright/blurry. Please upload a better lit photo.");
+        return;
+      }
+
+      // Use median of all nail predictions
+      const finalHb = median(nailPredictions);
+
+      // OOD check
+      if (finalHb < PREDICTION_SANITY.minPlausible || finalHb > PREDICTION_SANITY.maxPlausible) {
+        alert(
+          `Result rejected: predicted Hb = ${finalHb.toFixed(1)} g/dL is outside the plausible range (${PREDICTION_SANITY.minPlausible}–${PREDICTION_SANITY.maxPlausible} g/dL).\n\n` +
+          `This image is likely out-of-distribution. Please try with a different photo.`
+        );
+        return;
+      }
+
+      showResult(sourceCanvas, finalHb, nailPredictions.length > 1 ? {
+        framesUsed: nailPredictions.length,
+        framesTotal: nails.length,
+        stdDev: stdDev(nailPredictions),
+        range: nailPredictions.length > 1 ? Math.max(...nailPredictions) - Math.min(...nailPredictions) : 0,
+        unreliable: false,
+      } : null);
+
+    } else {
+      // ── Original single-crop path ──
+      const imageData = preprocessCanvasToImageData(sourceCanvas);
+
+      const validity = isFrameValid(imageData);
+      if (!validity.ok) {
+        alert("This image looks unusable (too dark/bright or blank). Please upload a clearer nail photo.");
+        return;
+      }
+
+      const hb = await inferSingle(imageData);
+
+      // Single-frame OOD check
+      if (hb < PREDICTION_SANITY.minPlausible || hb > PREDICTION_SANITY.maxPlausible) {
+        alert(
+          `Result rejected: predicted Hb = ${hb.toFixed(1)} g/dL is outside the plausible range (${PREDICTION_SANITY.minPlausible}–${PREDICTION_SANITY.maxPlausible} g/dL).\n\n` +
+          `This image is likely out-of-distribution. Please try with a clearer fingernail photo.`
+        );
+        return;
+      }
+
+      showResult(sourceCanvas, hb, null);
     }
-
-    const hb = await inferSingle(imageData);
-
-    // Single-frame OOD check
-    if (hb < PREDICTION_SANITY.minPlausible || hb > PREDICTION_SANITY.maxPlausible) {
-      alert(
-        `Result rejected: predicted Hb = ${hb.toFixed(1)} g/dL is outside the plausible range (${PREDICTION_SANITY.minPlausible}–${PREDICTION_SANITY.maxPlausible} g/dL).\n\n` +
-        `This image is likely out-of-distribution. Please try with a clearer fingernail photo.`
-      );
-      return;
-    }
-
-    showResult(sourceCanvas, hb, null);
 
   } catch (err) {
     console.error("Inference error:", err);

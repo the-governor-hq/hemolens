@@ -7,7 +7,7 @@
      - Stale-while-revalidate for model updates
    ================================================================ */
 
-const CACHE_NAME = "hemolens-v1";
+const CACHE_NAME = "hemolens-v2";
 
 // App shell — files that must be cached for offline use
 const APP_SHELL = [
@@ -15,8 +15,10 @@ const APP_SHELL = [
   "./index.html",
   "./style.css",
   "./app.js",
+  "./nail_detector.js",
   "./manifest.json",
   "./model/hemolens_hybrid_web.onnx",
+  "./model/nail_detector.onnx",
   "./icons/icon-192x192.png",
   "./icons/icon-512x512.png",
   "./icons/apple-touch-icon.png",

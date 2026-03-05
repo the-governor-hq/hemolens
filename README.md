@@ -2,14 +2,15 @@
 
 **An experimental, on-device pipeline for non-invasive hemoglobin level estimation.**
 
-Powered by a hybrid pipeline: frozen MobileNetV4-Conv-Small features + a tabular regressor, using the 2024 Yakimov et al. fingernail dataset (250 patients, single center).
+A two-stage browser pipeline: **YOLOv8-nano nail detector** → **MobileNetV4 Hb regression**, both running as ONNX models client-side via ONNX Runtime Web. Trained on the 2024 Yakimov et al. fingernail dataset (250 patients, single center).
 
-- **Cross-validated MAE: 1.91 ± 0.27 g/dL** (3-fold session-aware CV, 17 session groups)
+- **Nail detection**: mAP50 = 0.995, Precision = 0.982, Recall = 1.000 (YOLOv8n, 320×320)
+- **Hb regression CV MAE: 1.91 ± 0.27 g/dL** (3-fold session-aware CV, 17 session groups)
 - Best *offline hybrid* holdout result (CNN + color features + CatBoost): test MAE = 1.305 g/dL on 38 patients (3 test sessions — likely optimistic)
-- Deployed *web* model (ONNX, CNN-only Ridge head): test MAE ≈ 1.52 g/dL when averaging 3 crops per patient, ≈ 1.88–1.91 g/dL on single crops
+- Deployed *web* model (ONNX, CNN-only Ridge head): test MAE ≈ 1.52 g/dL when averaging 3 crops per patient
 - **Severe anemia detection is unreliable** — test MAE = 3.93 g/dL on severe cases (n=3)
 
-The web demo uses **multi-frame inference** (30 captures with IQR outlier rejection and median aggregation) to reduce single-frame noise.
+The web app auto-detects nail regions in each frame, then runs multi-frame Hb inference (30 captures with IQR outlier rejection and median aggregation) to reduce noise. No images leave the device.
 
 ---
 
@@ -18,19 +19,24 @@ The web demo uses **multi-frame inference** (30 captures with IQR outlier reject
 ```
 HemoLens/
 ├── research/          # Jupyter notebooks — EDA, feature extraction, baselines
-├── model/             # PyTorch training, dataset prep & ONNX export
-├── web-demo/          # Browser-based demo (ONNX Runtime Web, client-side inference)
-├── assets/            # Model files and labels
+├── model/             # Training pipelines (nail detector + Hb regressor), ONNX export
+├── web-demo/          # Browser PWA — two-stage ONNX inference, camera, offline-capable
+├── assets/            # Labels and supplementary files
 └── data/              # Raw images, metadata, processed crops & features
 ```
 
 ## Overview
 
-HemoLens estimates hemoglobin (Hb) levels from smartphone camera images of fingernail beds — no blood draw required. The pipeline:
+HemoLens estimates hemoglobin (Hb) levels from smartphone camera images of fingernail beds — no blood draw required. The pipeline runs entirely in the browser with two ONNX models:
 
-1. **Research** — EDA on the Yakimov et al. (2024) fingernail image dataset, color-space feature extraction (RGB, LAB, HSV), and traditional ML baselines (Ridge, SVR, Gradient Boosting).
-2. **Model** — Frozen MobileNetV4-Conv-Small backbone as a feature extractor (1280-dim), combined with 67 handcrafted color features (RGB, LAB, HSV means/std/percentiles + redness index), feeding a CatBoost regression head. The hybrid approach significantly outperforms end-to-end fine-tuning in the small-data regime (250 patients). Export to ONNX for edge deployment.
-3. **Web Demo** — Browser-based inference via ONNX Runtime Web (WASM). Inference runs client-side (no server-side computation and no uploads). Features multi-frame inference (30 captures → IQR outlier rejection → median), anatomical SVG finger guide overlay, flash/torch toggle, and WHO severity classification with confidence statistics.
+1. **Nail Detection (Stage 1)** — YOLOv8-nano (11.6 MB ONNX) detects nail bounding boxes in camera frames at 320×320. Trained on 1,500 annotated boxes (nail + skin classes) from the Yakimov dataset. Achieves mAP50 = 0.995 for nails with perfect recall.
+2. **Hb Regression (Stage 2)** — Frozen MobileNetV4-Conv-Small backbone (1280-dim features) + Ridge regression head (~10 MB ONNX). Runs on each detected nail crop (224×224, ImageNet-normalized). Multi-frame median reduces noise.
+3. **Web App** — Progressive Web App (PWA) via ONNX Runtime Web (WASM). Camera capture, auto nail detection, multi-frame inference (30 frames → IQR outlier rejection → median), WHO severity classification, image upload mode. Fully offline-capable.
+
+### Supporting pipelines
+
+- **Research** — EDA on the Yakimov et al. (2024) fingernail image dataset, color-space feature extraction (RGB, LAB, HSV), and traditional ML baselines (Ridge, SVR, Gradient Boosting).
+- **Offline Hybrid Model** — Frozen MobileNetV4 features + 67 handcrafted color features → CatBoost regression head. Best single-split test MAE = 1.305 g/dL, but color features are not available in the browser pipeline.
 
 ## Baseline Results (Notebook 03)
 
@@ -81,12 +87,14 @@ The hybrid frozen-backbone approach beats end-to-end fine-tuning by ~2× on this
 
 ## Key Features
 
+- **Two-stage pipeline**: YOLOv8-nano nail detection → MobileNetV4 Hb regression, both ONNX, both client-side.
+- **Automatic nail detection**: No manual alignment needed. The detector finds nail bounding boxes in each frame (mAP50 = 0.995, recall = 1.000). Falls back gracefully to a finger guide overlay if detector fails to load.
 - **Multi-frame inference**: Captures 30 frames at ~12.5 fps, rejects outliers via IQR, takes the median — significantly more robust than single-shot prediction.
-- **Client-side inference**: Hb estimation runs in the browser; the demo is hosted as static files (runtime assets may be loaded from CDN unless bundled).
 - **Privacy-preserving**: No images are ever uploaded; everything stays in the browser.
-- **Lightweight model**: Frozen MobileNetV4-Conv-Small backbone (~2.5M params) + Ridge head for web deployment.
+- **Offline-capable PWA**: Service worker caches all assets including both ONNX models. Works without network after first load.
+- **Lightweight models**: Nail detector 11.6 MB + Hb regressor ~10 MB. Total ~22 MB, runs on any device with WebAssembly.
+- **Image upload mode**: Upload a photo → detector finds all nails → runs Hb on each crop → reports median with per-nail breakdown.
 - **Web-ready**: ONNX Runtime Web (WASM) — works in any modern browser with a camera.
-- **Polished demo UX**: Anatomical SVG finger guide, circular progress ring during scanning, live prediction scatter strip, outlier visualization, flash/torch toggle, and result confidence statistics (std dev, range, frames used).
 
 ## Dataset
 
@@ -112,9 +120,15 @@ jupyter lab
 ```bash
 cd model
 pip install -r requirements.txt
+
+# Hb regression pipeline
 python prepare_dataset.py                              # crop nail ROIs → data/processed/
 python train_hybrid.py --config configs/mobilenet_edge.yaml  # hybrid: frozen CNN features + CatBoost
-python export_hybrid.py                                # export to ONNX for web/edge deployment
+python export_hybrid.py                                # export Hb model to ONNX
+
+# Nail detector pipeline
+python prepare_yolo_dataset.py                         # convert annotations → YOLO format
+python train_nail_detector.py                          # YOLOv8n training + ONNX export → web-demo/model/
 ```
 
 ### 3. Run the Web Demo
@@ -127,32 +141,77 @@ python serve.py --http --port 8080   # HTTP on localhost:8080
 
 ## Architecture
 
+### Two-Stage Inference Pipeline
+
 ```
-Input (224×224×3)
-  → MobileNetV4-Conv-Small (frozen pretrained, timm)
-  → Global Pool → [1280-dim]
-  → CatBoost / Ridge Regression → Hb (g/dL)
+Camera frame (any resolution)
+  ┌─── Stage 1: Nail Detection ───────────────────────────────┐
+  │ Letterbox resize → 320×320                                │
+  │ YOLOv8-nano (11.6 MB ONNX)                               │
+  │ → Nail bounding boxes (class: nail/skin, conf, x,y,w,h)  │
+  │ → NMS (IoU 0.45, conf 0.35) → best nail crop             │
+  └───────────────────────────────────────────────────────────┘
+        ↓ crop nail ROI from original frame
+  ┌─── Stage 2: Hb Regression ───────────────────────────────┐
+  │ Resize (shorter→256) → CenterCrop 224×224                │
+  │ ImageNet normalize                                        │
+  │ MobileNetV4-Conv-Small (frozen) → [1280-dim]             │
+  │ Ridge Regression → Hb (g/dL)                             │
+  │ ~10 MB ONNX                                              │
+  └───────────────────────────────────────────────────────────┘
+        ↓
+  Hb prediction (single frame)
 ```
+
+### Nail Detector (YOLOv8-nano)
+
+| Metric | Nail class | Skin class | Overall |
+|--------|-----------|-----------|---------|
+| Precision | 0.982 | 0.912 | 0.947 |
+| Recall | 1.000 | 0.909 | 0.955 |
+| mAP50 | 0.995 | 0.868 | 0.931 |
+
+- Trained on 1,500 bounding boxes (750 nail + 750 skin) from 250 images
+- 151 / 61 / 38 train / val / test split (session-aware)
+- Early stopped at epoch 58 (best at epoch 38)
+- ONNX opset 13, 320×320 static input, output shape (1, 6, 2100)
+
+### Hb Regression
+
+### Hb Regression
 
 **Training strategy for 250 patients:**
 - **Hybrid pipeline**: Frozen ImageNet backbone as feature extractor — avoids overfitting with small data
 - 3 nail crops per patient averaged to one 1280-dim feature vector
-- 67 handcrafted color features (RGB/LAB/HSV mean, std, median, P5, P95 + redness index) → 1347-dim input
+- 67 handcrafted color features (RGB/LAB/HSV mean, std, median, P5, P95 + redness index) → 1347-dim input (offline model only)
 - Session-aware splits (GroupShuffleSplit on measurement date) to prevent leakage
 - 3-fold session-aware cross-validation: **MAE = 1.912 ± 0.27 g/dL** (17 session groups, CV R² < 0)
 - End-to-end ONNX export (backbone + Ridge head) for edge deployment
 - **Note:** The deployed web model uses CNN-only Ridge (no color features), which is weaker than the offline CatBoost+color model
 
-**Multi-frame inference pipeline (web demo):**
+**Multi-frame inference pipeline (web app):**
 
 ```
 Capture button pressed
   → 30 frames captured at 80 ms intervals (~12.5 fps)
-  → Per frame: crop nail ROI → resize (shorter side → 256) → center-crop 224×224 → ImageNet normalize → ONNX inference
+  → Per frame:
+      1. Nail detector runs on full frame → best nail bounding box
+      2. Crop detected nail from original frame
+      3. Resize (shorter side → 256) → center-crop 224×224 → ImageNet normalize
+      4. Hb regression model → single Hb prediction
   → Collect 30 Hb predictions
   → IQR outlier rejection (drop values outside Q1 − 1.5·IQR … Q3 + 1.5·IQR)
   → Median of remaining predictions → final Hb estimate
   → Display with confidence stats (std dev, range, frames used)
+```
+
+**Image upload mode:**
+```
+User uploads photo
+  → Nail detector finds all nails in image
+  → Each nail: crop → Hb regression → individual prediction
+  → Median of all nail predictions → final Hb estimate
+  → All nail detections shown as overlay boxes
 ```
 
 ## ⚠️ Limitations
@@ -173,13 +232,23 @@ Capture button pressed
 >
 > The authors assume no liability for any use or misuse of this software.
 
+## Models
+
+| Model | File | Size | Input | Purpose |
+|-------|------|------|-------|---------|
+| YOLOv8-nano | `web-demo/model/nail_detector.onnx` | 11.6 MB | 1×3×320×320 | Nail detection (stage 1) |
+| MobileNetV4 + Ridge | `web-demo/model/hemolens_hybrid_web.onnx` | ~10 MB | 1×3×224×224 | Hb regression (stage 2) |
+
+Both models use ONNX opset 13 and run via ONNX Runtime Web (WASM backend).
+
 ## Requirements
 
 | Component       | Stack                              |
 |-----------------|-------------------------------------|
 | Research        | Python 3.10+, Jupyter, pandas, matplotlib, seaborn |
-| Model Training  | PyTorch 2.x, timm, CatBoost, scikit-learn |
-| Web Demo        | Modern browser with WebAssembly + camera (Chrome, Firefox, Safari, Edge) |
+| Hb Model Training | PyTorch 2.x, timm, CatBoost, scikit-learn |
+| Nail Detector   | ultralytics (YOLOv8), onnxslim |
+| Web App         | Modern browser with WebAssembly + camera (Chrome, Firefox, Safari, Edge) |
 | Dev Server      | Python 3 (any static HTTPS server works) |
 
 ## License

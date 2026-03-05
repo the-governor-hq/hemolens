@@ -49,6 +49,7 @@ desktop.ini
 # Data (large files — use DVC or Git LFS)
 data/raw/
 data/processed/
+data/nail_detection/
 *.csv
 *.parquet
 !research/metadata/*.csv

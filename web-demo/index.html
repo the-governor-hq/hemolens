@@ -22,6 +22,8 @@
 
   <!-- ONNX Runtime Web -->
   <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.3/dist/ort.min.js"></script>
+  <!-- Nail detector (YOLOv8-nano ONNX) — loaded before app.js -->
+  <script src="nail_detector.js"></script>
 </head>
 <body>
 
@@ -234,7 +236,63 @@
       <div class="instruction-chip">
         <span class="chip-dot"></span>
         <span id="instructionText">Place one fingernail inside the frame &mdash; fill the box as much as possible</span>
+        <span id="lightingQuality" class="lighting-quality quality-good">✓ Lighting looks good</span>
       </div>
+
+      <!-- Photo Tips (collapsible) -->
+      <details id="photoTips" class="photo-tips">
+        <summary class="photo-tips-toggle">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/>
+            <line x1="12" y1="8" x2="12.01" y2="8"/>
+          </svg>
+          Photo tips for best results
+        </summary>
+        <div class="photo-tips-content">
+          <div class="tip-item">
+            <span class="tip-icon">💡</span>
+            <div>
+              <strong>Use diffuse, neutral-white light</strong>
+              <p>Overhead room light or indirect daylight from a window. The model was trained under clinical lighting (~4000–5500 K). <em>Avoid</em> flash, direct sunlight, colored LEDs, or dim rooms.</p>
+            </div>
+          </div>
+          <div class="tip-item">
+            <span class="tip-icon">📏</span>
+            <div>
+              <strong>Hold 10–20 cm away</strong>
+              <p>Fill the frame with the fingernail. The nail bed should cover most of the guide box.</p>
+            </div>
+          </div>
+          <div class="tip-item">
+            <span class="tip-icon">💅</span>
+            <div>
+              <strong>No nail polish or artificial nails</strong>
+              <p>The model reads the natural nail bed color. Polish, gel, or acrylic nails will produce wrong results.</p>
+            </div>
+          </div>
+          <div class="tip-item">
+            <span class="tip-icon">✋</span>
+            <div>
+              <strong>Keep steady</strong>
+              <p>The 30-frame capture averages over ~2.5 seconds. Movement causes blur and high variance.</p>
+            </div>
+          </div>
+          <div class="tip-item">
+            <span class="tip-icon">🌡️</span>
+            <div>
+              <strong>Warm hands, relaxed position</strong>
+              <p>Cold hands have reduced blood flow to the nail bed, which can affect color. Avoid pressing down hard — let the finger rest naturally.</p>
+            </div>
+          </div>
+          <div class="tip-item tip-warning">
+            <span class="tip-icon">⚠️</span>
+            <div>
+              <strong>Known limitations</strong>
+              <p>Performance degrades on very dark or very pale skin (undertested in training data). Blue-ish or yellow-ish artificial lighting shifts the critical red-green color axis and causes hallucinated readings.</p>
+            </div>
+          </div>
+        </div>
+      </details>
 
       <!-- Camera controls -->
       <div class="camera-controls">

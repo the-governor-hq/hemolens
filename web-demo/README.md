@@ -1,6 +1,6 @@
 # web-demo/
 
-Browser-based demo for HemoLens — runs the ONNX model directly in the browser using [ONNX Runtime Web](https://onnxruntime.ai/docs/tutorials/web/).
+Browser-based PWA for HemoLens — runs two ONNX models directly in the browser using [ONNX Runtime Web](https://onnxruntime.ai/docs/tutorials/web/).
 
 ## Quick Start
 
@@ -11,23 +11,42 @@ python serve.py
 
 Then open **https://localhost:8443** (accept the self-signed certificate warning).
 
+For plain HTTP: `python serve.py --http --port 8080` (camera only works on localhost).
+
 ## Features
 
-- **Live camera** with SVG overlay guiding finger placement
-- **On-device inference** via ONNX Runtime Web (WASM) — no server-side computation
-- **Real-time result** with WHO severity classification and animated gauge
-- **Image upload** support for testing with saved images
-- **Front/rear camera** toggle
+- **Automatic nail detection**: YOLOv8-nano finds nail bounding boxes — no manual alignment needed
+- **Two-stage inference**: Nail detection (320×320) → Hb regression (224×224), both ONNX
+- **Multi-frame capture**: 30 frames → IQR outlier rejection → median Hb estimate
+- **Image upload**: Upload a photo → detects all nails → runs Hb on each → median result
+- **Offline-capable PWA**: Service worker caches both models + all assets
+- **On-device only**: No images are ever uploaded — everything stays in the browser
+- **Graceful fallback**: If nail detector fails to load, falls back to SVG finger guide overlay
+- **Front/rear camera** toggle with flash/torch support
 - **Mobile-first** responsive design
 
 ## How It Works
 
-1. The ONNX model (`hemolens_hybrid_web.onnx`, ~10 MB) loads in the browser via WASM
-2. User positions their fingernail in the guide overlay
-3. On capture, the nail region is cropped from the camera feed
-4. Image is resized (shorter side → 256), center-cropped to 224×224, and normalized (ImageNet stats)
-5. Inference runs client-side → outputs Hb estimation in g/dL
-6. Result displayed with severity badge (Severe / Moderate / Mild / Normal)
+1. Two ONNX models load in the browser via WASM:
+   - `nail_detector.onnx` (11.6 MB) — YOLOv8-nano for nail detection
+   - `hemolens_hybrid_web.onnx` (~10 MB) — MobileNetV4 + Ridge for Hb regression
+2. **Camera mode**: User presses capture → 30 frames grabbed at ~12.5 fps → per frame: detect best nail → crop → Hb inference → collect predictions → IQR filter → median
+3. **Upload mode**: Detector finds all nails in the image → runs Hb on each crop → reports median with per-nail breakdown
+4. Result displayed with WHO severity badge (Severe / Moderate / Mild / Normal) and confidence stats (std dev, range, frames used)
+
+## Files
+
+| File | Description |
+|------|-------------|
+| `index.html` | PWA shell — camera UI, result display, SVG guide overlay |
+| `app.js` | Main app logic — model loading, capture, inference, UI updates |
+| `nail_detector.js` | `NailDetector` class — YOLOv8 ONNX inference, letterbox, NMS |
+| `style.css` | Responsive styles |
+| `sw.js` | Service worker — caches models + assets for offline use |
+| `serve.py` | Dev server (HTTPS with self-signed cert, or HTTP) |
+| `manifest.json` | PWA manifest |
+| `model/hemolens_hybrid_web.onnx` | Hb regression model (~10 MB) |
+| `model/nail_detector.onnx` | Nail detection model (11.6 MB) |
 
 ## Requirements
 
@@ -39,4 +58,5 @@ Then open **https://localhost:8443** (accept the self-signed certificate warning
 
 - The `serve.py` script auto-generates a self-signed HTTPS certificate (requires OpenSSL)
 - Use `--http` flag to serve plain HTTP (camera only works on localhost)
-- The model file is ~10 MB — first load may take a few seconds on slow connections
+- Total model payload is ~22 MB — first load may take a few seconds on slow connections
+- Service worker (v2) caches everything for offline use after first load

@@ -1,6 +1,8 @@
 # model/
 
-PyTorch training pipeline for the HemoLens regression model with TFLite export.
+Training pipelines for both HemoLens models: **nail detector** (YOLOv8-nano) and **Hb regressor** (MobileNetV4 + Ridge/CatBoost).
+
+## Hb Regression
 
 Supports any timm backbone — default edge config uses **MobileNetV4-Conv-Small** (~2.5M params, ~2.5 MB INT8).
 
@@ -10,11 +12,20 @@ The primary approach is a **hybrid pipeline**: frozen pretrained backbone as fea
 - **3-fold session-aware CV MAE = 1.91 ± 0.27 g/dL** (CV R² < 0 — more honest generalizable estimate)
 - Deployed web model (CNN-only Ridge, no color features): test MAE ≈ 1.52 g/dL
 
+## Nail Detection (YOLOv8-nano)
+
+- **mAP50 = 0.995** for nails, 0.868 for skin, 0.931 overall
+- Precision = 0.982, Recall = 1.000 (nails)
+- 1,500 annotated boxes (750 nail + 750 skin) from 250 images
+- ONNX export: 11.6 MB, 320×320 static input, opset 13
+
 ## Files
 
 | File | Description |
 |------|-------------|
 | `prepare_dataset.py` | Crop nail ROIs, session-aware splits → `data/processed/` |
+| `prepare_yolo_dataset.py` | Convert annotations to YOLO format for nail detector |
+| `train_nail_detector.py` | Train YOLOv8-nano + ONNX export → `web-demo/model/` |
 | `train_hybrid.py` | **Recommended** — Frozen backbone feature extraction + Ridge/MLP |
 | `train.py` | End-to-end fine-tuning with progressive unfreezing (for comparison) |
 | `sweep_hybrid.py` | Backbone × head grid search (4 backbones × 4 heads) |
@@ -32,21 +43,35 @@ The primary approach is a **hybrid pipeline**: frozen pretrained backbone as fea
 # 1. Prepare dataset (crop nail ROIs, create train/val/test splits)
 python prepare_dataset.py
 
-# 2. Train hybrid model (recommended)
+# 2. Train hybrid Hb model (recommended)
 python train_hybrid.py --config configs/mobilenet_edge.yaml
 
-# 3. Export to ONNX (full backbone + Ridge head)
+# 3. Export Hb model to ONNX (full backbone + Ridge head)
 python export_hybrid.py
 
-# 4. (Optional) End-to-end fine-tuning for comparison
+# 4. Train nail detector + export ONNX
+python prepare_yolo_dataset.py    # convert annotations → YOLO format
+python train_nail_detector.py     # YOLOv8n training + ONNX export → web-demo/model/
+
+# 5. (Optional) End-to-end fine-tuning for comparison
 python train.py --config configs/mobilenet_edge.yaml
 ```
 
 ## Results
 
-> **Note:** Test metrics are from a 38-patient holdout (3 sessions). The small test set means these numbers are noisy. Cross-validation gives a more honest estimate.
+> **Note:** Hb test metrics are from a 38-patient holdout (3 sessions). The small test set means these numbers are noisy. Cross-validation gives a more honest estimate.
 
-### Hybrid Models (MobileNetV4-Conv-Small backbone)
+### Nail Detector (YOLOv8-nano, test set — 38 images)
+
+| Class | Precision | Recall | mAP50 |
+|-------|-----------|--------|-------|
+| **Nail** | **0.982** | **1.000** | **0.995** |
+| Skin | 0.912 | 0.909 | 0.868 |
+| Overall | 0.947 | 0.955 | 0.931 |
+
+Early stopped at epoch 58 (best at 38). Trained on 151 images, validated on 61.
+
+### Hybrid Hb Models (MobileNetV4-Conv-Small backbone)
 
 | Head | Val MAE | Test MAE | Test R² | CV MAE (3-fold) |
 |------|---------|----------|---------|------------------|
