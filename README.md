@@ -4,7 +4,7 @@
 
 Powered by a hybrid pipeline: frozen MobileNetV4-Conv-Small features + a tabular regressor, using the 2024 Yakimov et al. fingernail dataset (250 patients, single center).
 
-- **Cross-validated MAE: 1.91 ± 0.27 g/dL** (3-fold session-aware CV, 17 session groups) — the most honest generalizable estimate
+- **Cross-validated MAE: 1.91 ± 0.27 g/dL** (3-fold session-aware CV, 17 session groups)
 - Best *offline hybrid* holdout result (CNN + color features + CatBoost): test MAE = 1.305 g/dL on 38 patients (3 test sessions — likely optimistic)
 - Deployed *web* model (ONNX, CNN-only Ridge head): test MAE ≈ 1.52 g/dL when averaging 3 crops per patient, ≈ 1.88–1.91 g/dL on single crops
 - **Severe anemia detection is unreliable** — test MAE = 3.93 g/dL on severe cases (n=3)
