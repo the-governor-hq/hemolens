@@ -1012,6 +1012,83 @@ html, body {
 }
 
 
+/* ─── Low-Light Warning Banner ─── */
+
+.low-light-banner {
+  position: absolute;
+  bottom: 100px;          /* sit above the controls bar */
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: rgba(234, 179, 8, 0.18);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(234, 179, 8, 0.35);
+  border-radius: 100px;
+  padding: 0.45rem 0.65rem 0.45rem 0.85rem;
+  max-width: calc(100% - 2rem);
+  white-space: nowrap;
+  animation: lowLightSlideIn 0.35s ease-out;
+  pointer-events: auto;
+}
+
+.low-light-banner.hidden {
+  display: none !important;
+}
+
+@keyframes lowLightSlideIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(12px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
+.low-light-banner svg {
+  flex-shrink: 0;
+  color: var(--yellow-500);
+}
+
+.low-light-text {
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.92);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.low-light-flash-btn {
+  flex-shrink: 0;
+  background: var(--yellow-500);
+  color: var(--slate-900);
+  border: none;
+  border-radius: 100px;
+  padding: 0.25rem 0.7rem;
+  font-size: 0.68rem;
+  font-weight: 700;
+  font-family: var(--font);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.low-light-flash-btn:hover {
+  background: #facc15;
+}
+
+.low-light-dismiss {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 1.1rem;
+  cursor: pointer;
+  padding: 0 0.2rem;
+  line-height: 1;
+}
+.low-light-dismiss:hover {
+  color: rgba(255, 255, 255, 0.9);
+}
+
+
 /* ─── Desktop Responsive ─── */
 
 @media (min-width: 640px) {

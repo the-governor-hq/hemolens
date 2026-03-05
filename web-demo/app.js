@@ -72,6 +72,11 @@ const $retakeBtn    = document.getElementById("retakeBtn");
 
 const $instructionText = document.getElementById("instructionText");
 
+// Low-light warning banner
+const $lowLightBanner   = document.getElementById("lowLightBanner");
+const $lowLightFlashBtn = document.getElementById("lowLightFlashBtn");
+const $lowLightDismiss  = document.getElementById("lowLightDismiss");
+
 // Multi-frame scanning overlay
 const $scanOverlay      = document.getElementById("scanOverlay");
 const $scanRingProgress = document.getElementById("scanRingProgress");
@@ -100,6 +105,8 @@ let facingMode = "environment";  // prefer rear camera
 let isProcessing = false;
 let flashOn = false;         // torch state
 let scanAborted = false;     // cancel flag for multi-frame
+let lightMonitorId = null;   // setInterval handle for ambient light check
+let lowLightDismissed = false; // user dismissed the banner this session
 
 
 // ─── Instruction Text ───
@@ -113,6 +120,85 @@ function setInstructionMode(mode) {
   if (!$instructionText) return;
   const txt = INSTRUCTIONS[mode] || INSTRUCTIONS.camera;
   $instructionText.textContent = txt;
+}
+
+
+// ─── Ambient Light Monitoring ───
+
+const LIGHT_CHECK_INTERVAL_MS = 1500;  // how often we sample (ms)
+const LOW_LIGHT_LUMA_THRESHOLD = 0.13; // mean luma below this => warn
+const LOW_LIGHT_CONSEC_NEEDED  = 2;    // consecutive low readings before showing banner
+let   _lowLightConsec = 0;             // rolling counter
+
+/** Sample a centre crop from the live video feed and return mean luma [0-1]. */
+function sampleVideoLuma() {
+  if (!$video || $video.readyState < 2 || !$video.videoWidth) return null;
+
+  // Sample a small 64×64 centre crop for speed
+  const size = 64;
+  const tmpCanvas = document.createElement("canvas");
+  tmpCanvas.width = size;
+  tmpCanvas.height = size;
+  const ctx = tmpCanvas.getContext("2d");
+
+  const vw = $video.videoWidth;
+  const vh = $video.videoHeight;
+  const sx = Math.floor((vw - size) / 2);
+  const sy = Math.floor((vh - size) / 2);
+  ctx.drawImage($video, sx, sy, size, size, 0, 0, size, size);
+
+  const imgData = ctx.getImageData(0, 0, size, size);
+  const stats = computeLumaStats(imgData);
+  return stats.mean;
+}
+
+/** Start periodic light level checks on the camera feed. */
+function startLightMonitor() {
+  stopLightMonitor();
+  _lowLightConsec = 0;
+  lowLightDismissed = false;
+
+  lightMonitorId = setInterval(() => {
+    // Don't check while scanning or showing results
+    if (isProcessing || !$resultSection.classList.contains("hidden")) return;
+    if (lowLightDismissed) return;
+
+    const luma = sampleVideoLuma();
+    if (luma === null) return;
+
+    if (luma < LOW_LIGHT_LUMA_THRESHOLD) {
+      _lowLightConsec++;
+      if (_lowLightConsec >= LOW_LIGHT_CONSEC_NEEDED) {
+        showLowLightBanner();
+      }
+    } else {
+      _lowLightConsec = 0;
+      hideLowLightBanner();
+    }
+  }, LIGHT_CHECK_INTERVAL_MS);
+}
+
+function stopLightMonitor() {
+  if (lightMonitorId !== null) {
+    clearInterval(lightMonitorId);
+    lightMonitorId = null;
+  }
+}
+
+function showLowLightBanner() {
+  if (!$lowLightBanner) return;
+  // Hide the flash CTA if torch isn't available
+  if ($flashBtn.classList.contains("flash-unsupported")) {
+    $lowLightFlashBtn.style.display = "none";
+  } else {
+    $lowLightFlashBtn.style.display = "";
+  }
+  $lowLightBanner.classList.remove("hidden");
+}
+
+function hideLowLightBanner() {
+  if (!$lowLightBanner) return;
+  $lowLightBanner.classList.add("hidden");
 }
 
 
@@ -172,6 +258,7 @@ function isFrameValid(imageData) {
 function resetForNewCapture() {
   // Flush any previous result immediately
   hideResult();
+  hideLowLightBanner();
 
   // Reset scan overlay state
   scanAborted = false;
@@ -258,8 +345,10 @@ async function loadModel() {
       $splash.classList.add("hidden");
       $app.classList.remove("hidden");
       initDebugControls();
-      startCamera();
-      checkFlashSupport();
+      startCamera().then(() => {
+        checkFlashSupport();
+        startLightMonitor();
+      });
     }, 600);
 
   } catch (err) {
@@ -933,9 +1022,12 @@ $switchBtn.addEventListener("click", () => {
   facingMode = facingMode === "environment" ? "user" : "environment";
   flashOn = false;
   $flashBtn.classList.remove("flash-on");
+  hideLowLightBanner();
   setInstructionMode("camera");
-  startCamera();
-  checkFlashSupport();
+  startCamera().then(() => {
+    checkFlashSupport();
+    startLightMonitor();
+  });
 });
 
 $uploadBtn.addEventListener("click", () => $fileInput.click());
@@ -993,6 +1085,11 @@ async function toggleFlash() {
     flashOn = !flashOn;
     await track.applyConstraints({ advanced: [{ torch: flashOn }] });
     $flashBtn.classList.toggle("flash-on", flashOn);
+    // If user manually turned on flash, dismiss the low-light warning
+    if (flashOn) {
+      hideLowLightBanner();
+      lowLightDismissed = true;
+    }
   } catch (err) {
     console.warn("Torch not supported:", err.message);
     $flashBtn.classList.add("flash-unsupported");
@@ -1001,6 +1098,21 @@ async function toggleFlash() {
 }
 
 $flashBtn.addEventListener("click", toggleFlash);
+
+// Low-light banner actions
+if ($lowLightFlashBtn) {
+  $lowLightFlashBtn.addEventListener("click", async () => {
+    if (!flashOn) await toggleFlash();
+    hideLowLightBanner();
+    lowLightDismissed = true;
+  });
+}
+if ($lowLightDismiss) {
+  $lowLightDismiss.addEventListener("click", () => {
+    hideLowLightBanner();
+    lowLightDismissed = true;
+  });
+}
 
 
 // ─── Utility ───

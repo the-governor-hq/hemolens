@@ -208,6 +208,16 @@
         </div>
       </div>
 
+      <!-- Low-light warning banner -->
+      <div id="lowLightBanner" class="low-light-banner hidden">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+        </svg>
+        <span class="low-light-text">Low light detected &mdash; results may be inaccurate</span>
+        <button id="lowLightFlashBtn" class="low-light-flash-btn">Turn on flash</button>
+        <button id="lowLightDismiss" class="low-light-dismiss" aria-label="Dismiss">&times;</button>
+      </div>
+
       <!-- Instruction chip (above controls) -->
       <div class="instruction-chip">
         <span class="chip-dot"></span>
