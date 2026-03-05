@@ -1,8 +1,13 @@
 # HemoLens 🔬
 
-**A high-performance, offline engine for non-invasive hemoglobin level estimation.**
+**A high-performance, on-device pipeline for non-invasive hemoglobin level estimation.**
 
-Powered by a hybrid pipeline: frozen MobileNetV4-Conv-Small features + CatBoost regression, using the 2024 Yakimov et al. fingernail dataset. Best test MAE = **1.305 g/dL** (R² = 0.46). The web demo uses **multi-frame inference** (30 captures with IQR outlier rejection and median aggregation) for robust, clinical-grade estimates.
+Powered by a hybrid pipeline: frozen MobileNetV4-Conv-Small features + a tabular regressor, using the 2024 Yakimov et al. fingernail dataset.
+
+- Best *offline hybrid* result (CNN features + color features + CatBoost): test MAE = **1.305 g/dL** (R² = 0.46)
+- Deployed *web* model (ONNX, CNN-only Ridge head): test MAE ≈ **1.52 g/dL** when averaging the 3 nail crops per patient (training-like), and ≈ **1.88–1.91 g/dL** on single crops (web-like)
+
+The web demo uses **multi-frame inference** (30 captures with IQR outlier rejection and median aggregation) to reduce single-frame noise.
 
 ---
 
@@ -12,7 +17,7 @@ Powered by a hybrid pipeline: frozen MobileNetV4-Conv-Small features + CatBoost 
 HemoLens/
 ├── research/          # Jupyter notebooks — EDA, feature extraction, baselines
 ├── model/             # PyTorch training, dataset prep & ONNX export
-├── web-demo/          # Browser-based demo (ONNX Runtime Web, runs offline)
+├── web-demo/          # Browser-based demo (ONNX Runtime Web, client-side inference)
 ├── assets/            # Model files and labels
 └── data/              # Raw images, metadata, processed crops & features
 ```
@@ -23,7 +28,7 @@ HemoLens estimates hemoglobin (Hb) levels from smartphone camera images of finge
 
 1. **Research** — EDA on the Yakimov et al. (2024) fingernail image dataset, color-space feature extraction (RGB, LAB, HSV), and traditional ML baselines (Ridge, SVR, Gradient Boosting).
 2. **Model** — Frozen MobileNetV4-Conv-Small backbone as a feature extractor (1280-dim), combined with 67 handcrafted color features (RGB, LAB, HSV means/std/percentiles + redness index), feeding a CatBoost regression head. The hybrid approach significantly outperforms end-to-end fine-tuning in the small-data regime (250 patients). Export to ONNX for edge deployment.
-3. **Web Demo** — Browser-based inference via ONNX Runtime Web (WASM). Runs 100% on-device — no server, no uploads, privacy-first. Features multi-frame inference (30 captures → IQR outlier rejection → median), anatomical SVG finger guide overlay, flash/torch toggle, and WHO severity classification with confidence statistics.
+3. **Web Demo** — Browser-based inference via ONNX Runtime Web (WASM). Inference runs client-side (no server-side computation and no uploads). Features multi-frame inference (30 captures → IQR outlier rejection → median), anatomical SVG finger guide overlay, flash/torch toggle, and WHO severity classification with confidence statistics.
 
 ## Baseline Results (Notebook 03)
 
@@ -64,7 +69,7 @@ The hybrid frozen-backbone approach beats end-to-end fine-tuning by >2× on this
 ## Key Features
 
 - **Multi-frame inference**: Captures 30 frames at ~12.5 fps, rejects outliers via IQR, takes the median — significantly more robust than single-shot prediction.
-- **Offline-first**: All inference runs on-device — no server, no cloud dependency.
+- **Client-side inference**: Hb estimation runs in the browser; the demo is hosted as static files (runtime assets may be loaded from CDN unless bundled).
 - **Privacy-preserving**: No images are ever uploaded; everything stays in the browser.
 - **Lightweight model**: Frozen MobileNetV4-Conv-Small backbone (~2.5M params) + CatBoost head.
 - **Web-ready**: ONNX Runtime Web (WASM) — works in any modern browser with a camera.
@@ -129,7 +134,7 @@ Input (224×224×3)
 ```
 Capture button pressed
   → 30 frames captured at 80 ms intervals (~12.5 fps)
-  → Per frame: crop nail ROI → resize 224×224 → ImageNet normalize → ONNX inference
+  → Per frame: crop nail ROI → resize (shorter side → 256) → center-crop 224×224 → ImageNet normalize → ONNX inference
   → Collect 30 Hb predictions
   → IQR outlier rejection (drop values outside Q1 − 1.5·IQR … Q3 + 1.5·IQR)
   → Median of remaining predictions → final Hb estimate

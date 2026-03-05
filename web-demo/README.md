@@ -25,7 +25,7 @@ Then open **https://localhost:8443** (accept the self-signed certificate warning
 1. The ONNX model (`hemolens_hybrid_web.onnx`, ~10 MB) loads in the browser via WASM
 2. User positions their fingernail in the guide overlay
 3. On capture, the nail region is cropped from the camera feed
-4. Image is resized to 224×224 and normalized (ImageNet stats)
+4. Image is resized (shorter side → 256), center-cropped to 224×224, and normalized (ImageNet stats)
 5. Inference runs client-side → outputs Hb estimation in g/dL
 6. Result displayed with severity badge (Severe / Moderate / Mild / Normal)
 

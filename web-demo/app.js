@@ -334,13 +334,49 @@ function grabNailFrame(crop) {
   const ctx = $captureCanvas.getContext("2d");
   ctx.drawImage($video, crop.x, crop.y, crop.w, crop.h, 0, 0, crop.w, crop.h);
 
-  // Resize to model input
-  const resizeCanvas = document.createElement("canvas");
-  resizeCanvas.width = INPUT_SIZE;
-  resizeCanvas.height = INPUT_SIZE;
-  const rCtx = resizeCanvas.getContext("2d");
-  rCtx.drawImage($captureCanvas, 0, 0, INPUT_SIZE, INPUT_SIZE);
-  return rCtx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE);
+  // Match training/val preprocessing:
+  // Resize (shorter side = 256, preserve aspect) -> CenterCrop 224
+  return preprocessCanvasToImageData($captureCanvas);
+}
+
+
+// ─── Preprocessing (match training) ───
+
+function resizeShortestSide(srcCanvas, targetShortSide) {
+  const sw = srcCanvas.width;
+  const sh = srcCanvas.height;
+  const shortSide = Math.min(sw, sh);
+  if (!shortSide) return srcCanvas;
+
+  const scale = targetShortSide / shortSide;
+  const dw = Math.max(1, Math.round(sw * scale));
+  const dh = Math.max(1, Math.round(sh * scale));
+
+  const out = document.createElement("canvas");
+  out.width = dw;
+  out.height = dh;
+  const octx = out.getContext("2d");
+  octx.drawImage(srcCanvas, 0, 0, dw, dh);
+  return out;
+}
+
+function centerCrop(srcCanvas, cropSize) {
+  const out = document.createElement("canvas");
+  out.width = cropSize;
+  out.height = cropSize;
+  const octx = out.getContext("2d");
+
+  const sx = Math.max(0, Math.floor((srcCanvas.width - cropSize) / 2));
+  const sy = Math.max(0, Math.floor((srcCanvas.height - cropSize) / 2));
+  octx.drawImage(srcCanvas, sx, sy, cropSize, cropSize, 0, 0, cropSize, cropSize);
+  return out;
+}
+
+function preprocessCanvasToImageData(srcCanvas) {
+  const resized = resizeShortestSide(srcCanvas, 256);
+  const cropped = centerCrop(resized, INPUT_SIZE);
+  const ctx = cropped.getContext("2d");
+  return ctx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE);
 }
 
 
@@ -606,12 +642,7 @@ async function processImage(sourceCanvas) {
   $scanLine.classList.remove("hidden");
 
   try {
-    const resizeCanvas = document.createElement("canvas");
-    resizeCanvas.width = INPUT_SIZE;
-    resizeCanvas.height = INPUT_SIZE;
-    const rCtx = resizeCanvas.getContext("2d");
-    rCtx.drawImage(sourceCanvas, 0, 0, INPUT_SIZE, INPUT_SIZE);
-    const imageData = rCtx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE);
+    const imageData = preprocessCanvasToImageData(sourceCanvas);
 
     const validity = isFrameValid(imageData);
     if (!validity.ok) {
