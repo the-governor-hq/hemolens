@@ -27,6 +27,11 @@ let useFlipTTA = true; // average original + horizontally-flipped inference
 let debugEnabled = false;
 const DEBUG_THUMBS_MAX = 12;
 
+// Auto-capture when a nail is held with high confidence
+const AUTO_CAPTURE_CONF        = 0.72; // min confidence to count toward auto-capture
+const AUTO_CAPTURE_HOLD_FRAMES = 7;    // consecutive live-detect frames required (~1 s at 6 fps)
+let   _highConfConsec          = 0;    // running counter of consecutive high-conf frames
+
 // Frame validity gates (to avoid "normal" results on blocked/black frames)
 // These thresholds are intentionally conservative and should be tuned with real captures.
 const MIN_VALID_FRAMES = 10;
@@ -122,7 +127,7 @@ let lowLightDismissed = false; // user dismissed the banner this session
 let _liveDetectRunning = false; // live detection overlay loop active
 let _liveDetectRAF = null;      // requestAnimationFrame handle
 let _liveDetectLastRun = 0;     // timestamp of last detection run
-const LIVE_DETECT_INTERVAL_MS = 165; // ~6 fps
+const LIVE_DETECT_INTERVAL_MS = 120; // ~8 fps
 
 
 // ─── Instruction Text ───
@@ -164,6 +169,7 @@ function startLiveDetect() {
 /** Stop the detection overlay loop and clear the canvas. */
 function stopLiveDetect() {
   _liveDetectRunning = false;
+  _highConfConsec = 0;
   if (_liveDetectRAF !== null) {
     cancelAnimationFrame(_liveDetectRAF);
     _liveDetectRAF = null;
@@ -239,6 +245,30 @@ async function _runLiveDetect() {
     }
 
     _drawDetectionBoxes(ctx, detections, scale, offX, offY, cw2, ch2);
+
+    // ── Auto-capture: start scan immediately when nail confidence stays high ──
+    const nailHits  = detections.filter(d => d.className === "nail");
+    const bestConf  = nailHits.length > 0 ? nailHits[0].confidence : 0;
+    if (!isProcessing && bestConf >= AUTO_CAPTURE_CONF) {
+      _highConfConsec++;
+
+      // Draw a bottom progress bar showing auto-capture imminence
+      const pct = Math.min(_highConfConsec / AUTO_CAPTURE_HOLD_FRAMES, 1);
+      const barH = 5;
+      ctx.save();
+      ctx.fillStyle = "rgba(52,211,153,0.25)";
+      ctx.fillRect(0, ch2 - barH, cw2, barH);
+      ctx.fillStyle = "#34d399";
+      ctx.fillRect(0, ch2 - barH, cw2 * pct, barH);
+      ctx.restore();
+
+      if (_highConfConsec >= AUTO_CAPTURE_HOLD_FRAMES) {
+        _highConfConsec = 0;
+        captureMultiFrame();
+      }
+    } else {
+      _highConfConsec = 0;
+    }
   } catch (_) {
     // Silently ignore transient errors (model warming up, frame grab race, etc.)
   }
@@ -561,6 +591,7 @@ function resetForNewCapture() {
   // Flush any previous result immediately
   hideResult();
   hideLowLightBanner();
+  _highConfConsec = 0;  // clear auto-capture counter
 
   // Reset scan overlay state
   scanAborted = false;
