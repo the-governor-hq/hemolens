@@ -470,8 +470,12 @@
             if (!banner) return;
             banner.hidden = false;
             document.getElementById("swUpdateReload").onclick = () => {
-              // Tell the waiting SW to take over immediately
+              // Tell the waiting SW to take over, then reload to pick up new assets.
+              // The controllerchange event also triggers reload, but adding a direct
+              // reload here makes the button reliably work even when controllerchange
+              // doesn't fire (common in local/HTTP dev environments).
               waitingWorker.postMessage({ type: "SKIP_WAITING" });
+              setTimeout(() => window.location.reload(), 250);
             };
           }
 
