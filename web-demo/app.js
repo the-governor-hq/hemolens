@@ -19,6 +19,17 @@ const IMAGENET_STD  = [0.229, 0.224, 0.225];
 const MULTI_FRAME_COUNT = 30;
 const FRAME_INTERVAL_MS = 80;  // ~12.5 fps capture rate
 
+// Frame validity gates (to avoid "normal" results on blocked/black frames)
+// These thresholds are intentionally conservative and should be tuned with real captures.
+const MIN_VALID_FRAMES = 10;
+const FRAME_QUALITY = {
+  minMeanLuma: 0.08,     // too dark if below (~20/255)
+  maxMeanLuma: 0.95,     // too bright if above
+  minStdLuma:  0.02,     // too uniform / no texture
+  maxBlackFrac: 0.85,    // mostly black pixels
+  maxWhiteFrac: 0.85,    // mostly white pixels
+};
+
 // WHO anemia severity thresholds (g/dL)
 const SEVERITY = [
   { label: "Severe",   min: 0,  max: 8,  cls: "severe"   },
@@ -52,6 +63,8 @@ const $severityBadge= document.getElementById("severityBadge");
 const $closeResult  = document.getElementById("closeResult");
 const $retakeBtn    = document.getElementById("retakeBtn");
 
+const $instructionText = document.getElementById("instructionText");
+
 // Multi-frame scanning overlay
 const $scanOverlay      = document.getElementById("scanOverlay");
 const $scanRingProgress = document.getElementById("scanRingProgress");
@@ -74,6 +87,87 @@ let facingMode = "environment";  // prefer rear camera
 let isProcessing = false;
 let flashOn = false;         // torch state
 let scanAborted = false;     // cancel flag for multi-frame
+
+
+// ─── Instruction Text ───
+
+const INSTRUCTIONS = {
+  camera: "Place one fingernail inside the frame — fill the box as much as possible",
+  upload: "Uploaded image mode — analyzing one photo. Use a sharp, well-lit close-up of one fingernail.",
+};
+
+function setInstructionMode(mode) {
+  if (!$instructionText) return;
+  const txt = INSTRUCTIONS[mode] || INSTRUCTIONS.camera;
+  $instructionText.textContent = txt;
+}
+
+
+// ─── Frame Quality / Validity ───
+
+function computeLumaStats(imageData) {
+  const d = imageData.data;
+  const n = imageData.width * imageData.height;
+  if (!n) {
+    return { mean: 0, std: 0, blackFrac: 1, whiteFrac: 0 };
+  }
+
+  let sum = 0;
+  let sumSq = 0;
+  let black = 0;
+  let white = 0;
+
+  // Luma in [0,1]
+  for (let i = 0; i < n; i++) {
+    const r = d[i * 4];
+    const g = d[i * 4 + 1];
+    const b = d[i * 4 + 2];
+    const y = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0;
+    sum += y;
+    sumSq += y * y;
+    if (y < 0.03) black++;
+    if (y > 0.97) white++;
+  }
+
+  const mean = sum / n;
+  const variance = Math.max(0, sumSq / n - mean * mean);
+  const std = Math.sqrt(variance);
+
+  return {
+    mean,
+    std,
+    blackFrac: black / n,
+    whiteFrac: white / n,
+  };
+}
+
+function isFrameValid(imageData) {
+  const s = computeLumaStats(imageData);
+  const ok = (
+    s.mean >= FRAME_QUALITY.minMeanLuma &&
+    s.mean <= FRAME_QUALITY.maxMeanLuma &&
+    s.std >= FRAME_QUALITY.minStdLuma &&
+    s.blackFrac <= FRAME_QUALITY.maxBlackFrac &&
+    s.whiteFrac <= FRAME_QUALITY.maxWhiteFrac
+  );
+  return { ok, stats: s };
+}
+
+
+// ─── UI Reset Helpers ───
+
+function resetForNewCapture() {
+  // Flush any previous result immediately
+  hideResult();
+
+  // Reset scan overlay state
+  scanAborted = false;
+  $scanDots.innerHTML = "";
+  $scanFrameNum.textContent = "0";
+  $scanRingProgress.style.strokeDashoffset = 2 * Math.PI * 52;
+  $scanOverlay.classList.add("hidden");
+  $guideOverlay.style.opacity = "";
+}
 
 
 // ─── Model Loading ───
@@ -310,16 +404,18 @@ function stdDev(arr) {
 }
 
 
-/** Update the scanning overlay progress */
-function updateScanUI(frameIdx, totalFrames, predictions) {
+/** Update the scanning overlay progress.
+ * Pass `newHb` to append a dot; pass null/undefined to only update progress.
+ */
+function updateScanUI(frameIdx, totalFrames, newHb) {
   const CIRCUMFERENCE = 2 * Math.PI * 52; // r=52
   const progress = frameIdx / totalFrames;
   $scanRingProgress.style.strokeDashoffset = CIRCUMFERENCE * (1 - progress);
   $scanFrameNum.textContent = frameIdx;
 
   // Add a dot to the scatter strip
-  if (predictions.length > 0) {
-    const val = predictions[predictions.length - 1];
+  if (newHb !== null && newHb !== undefined) {
+    const val = newHb;
     const dot = document.createElement("div");
     dot.className = "scan-dot";
     // Height maps Hb 2–20 to 6–30px
@@ -343,6 +439,16 @@ function markOutlierDots(predictions, rejectedIndices) {
 async function captureMultiFrame() {
   if (isProcessing) return;
 
+  setInstructionMode("camera");
+
+  resetForNewCapture();
+
+  // Basic guard: ensure video has real frames
+  if ($video.readyState < 2 || !$video.videoWidth || !$video.videoHeight) {
+    alert("Camera not ready yet. Please wait a moment and try again.");
+    return;
+  }
+
   const crop = getNailCropRect();
   if (!crop) return;
 
@@ -363,6 +469,7 @@ async function captureMultiFrame() {
   $guideOverlay.style.opacity = "0.3";
 
   const predictions = [];
+  let invalidFrames = 0;
   let lastPreviewCanvas = null;
 
   try {
@@ -375,8 +482,27 @@ async function captureMultiFrame() {
       // Grab frame
       const imageData = grabNailFrame(crop);
 
-      // Save a preview canvas from the middle frame
-      if (i === Math.floor(MULTI_FRAME_COUNT / 2)) {
+      // Reject blocked/black/overexposed/too-uniform frames
+      const validity = isFrameValid(imageData);
+      if (!validity.ok) {
+        invalidFrames++;
+        updateScanUI(i + 1, MULTI_FRAME_COUNT, null);
+
+        // If it's impossible to reach MIN_VALID_FRAMES anymore, bail early
+        const framesLeft = (MULTI_FRAME_COUNT - 1) - i;
+        const maxPossible = predictions.length + framesLeft;
+        if (maxPossible < MIN_VALID_FRAMES) {
+          break;
+        }
+
+        if (i < MULTI_FRAME_COUNT - 1) {
+          await sleep(FRAME_INTERVAL_MS);
+        }
+        continue;
+      }
+
+      // Save a preview canvas from the first valid frame, then refine near the middle
+      if (!lastPreviewCanvas || i === Math.floor(MULTI_FRAME_COUNT / 2)) {
         lastPreviewCanvas = document.createElement("canvas");
         lastPreviewCanvas.width = crop.w;
         lastPreviewCanvas.height = crop.h;
@@ -395,7 +521,7 @@ async function captureMultiFrame() {
       predictions.push(hb);
 
       // Update UI
-      updateScanUI(i + 1, MULTI_FRAME_COUNT, predictions);
+      updateScanUI(i + 1, MULTI_FRAME_COUNT, hb);
 
       // Wait between frames
       if (i < MULTI_FRAME_COUNT - 1) {
@@ -403,8 +529,16 @@ async function captureMultiFrame() {
       }
     }
 
-    if (scanAborted || predictions.length === 0) {
+    if (scanAborted) {
       // Cancelled — silently return
+      return;
+    }
+
+    if (predictions.length < MIN_VALID_FRAMES) {
+      const msg = invalidFrames >= MULTI_FRAME_COUNT
+        ? "No usable frames captured. Camera may be blocked/too dark/overexposed."
+        : `Too few usable frames (${predictions.length}/${MULTI_FRAME_COUNT}). Please hold steady and retry.`;
+      alert(msg);
       return;
     }
 
@@ -466,6 +600,7 @@ async function captureMultiFrame() {
 /** Single-image inference (for file upload) */
 async function processImage(sourceCanvas) {
   if (isProcessing) return;
+  resetForNewCapture();
   isProcessing = true;
 
   $scanLine.classList.remove("hidden");
@@ -477,6 +612,12 @@ async function processImage(sourceCanvas) {
     const rCtx = resizeCanvas.getContext("2d");
     rCtx.drawImage(sourceCanvas, 0, 0, INPUT_SIZE, INPUT_SIZE);
     const imageData = rCtx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE);
+
+    const validity = isFrameValid(imageData);
+    if (!validity.ok) {
+      alert("This image looks unusable (too dark/bright or blank). Please upload a clearer nail photo.");
+      return;
+    }
 
     const hb = await inferSingle(imageData);
     showResult(sourceCanvas, hb, null);
@@ -571,6 +712,10 @@ function hideResult() {
 function handleFileUpload(file) {
   if (!file || !file.type.startsWith("image/")) return;
 
+  setInstructionMode("upload");
+
+  resetForNewCapture();
+
   const img = new Image();
   img.onload = () => {
     // Draw to canvas
@@ -599,6 +744,7 @@ $switchBtn.addEventListener("click", () => {
   facingMode = facingMode === "environment" ? "user" : "environment";
   flashOn = false;
   $flashBtn.classList.remove("flash-on");
+  setInstructionMode("camera");
   startCamera();
   checkFlashSupport();
 });
@@ -610,7 +756,10 @@ $fileInput.addEventListener("change", (e) => {
 });
 
 $closeResult.addEventListener("click", hideResult);
-$retakeBtn.addEventListener("click", hideResult);
+$retakeBtn.addEventListener("click", () => {
+  setInstructionMode("camera");
+  hideResult();
+});
 
 // Keyboard shortcut: Space to capture
 document.addEventListener("keydown", (e) => {
@@ -674,4 +823,5 @@ function sleep(ms) {
 
 // ─── Bootstrap ───
 
+setInstructionMode("camera");
 loadModel();
