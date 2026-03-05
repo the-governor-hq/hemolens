@@ -175,6 +175,35 @@
 
         <!-- Scanning animation (shown during inference) -->
         <div id="scanLine" class="scan-line hidden"></div>
+
+        <!-- Multi-frame scanning overlay -->
+        <div id="scanOverlay" class="scan-overlay hidden">
+          <div class="scan-overlay-inner">
+            <!-- Circular progress ring -->
+            <svg class="scan-ring" viewBox="0 0 120 120">
+              <circle cx="60" cy="60" r="52" fill="none" stroke="rgba(255,255,255,0.1)" stroke-width="5"/>
+              <circle id="scanRingProgress" cx="60" cy="60" r="52" fill="none"
+                      stroke="url(#scanGrad)" stroke-width="5"
+                      stroke-linecap="round" stroke-dasharray="326.73" stroke-dashoffset="326.73"
+                      transform="rotate(-90 60 60)"/>
+              <defs>
+                <linearGradient id="scanGrad" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%" stop-color="#f87171"/>
+                  <stop offset="100%" stop-color="#ef4444"/>
+                </linearGradient>
+              </defs>
+            </svg>
+            <!-- Counter inside ring -->
+            <div class="scan-counter">
+              <span id="scanFrameNum" class="scan-frame-num">0</span>
+              <span class="scan-frame-total">/30</span>
+            </div>
+            <p class="scan-label">Analyzing frames&hellip;</p>
+            <!-- Live mini-predictions -->
+            <div class="scan-dots" id="scanDots"></div>
+            <button id="scanCancelBtn" class="scan-cancel-btn">Cancel</button>
+          </div>
+        </div>
       </div>
 
       <!-- Instruction chip (above controls) -->
@@ -237,6 +266,22 @@
           </div>
         </div>
 
+        <!-- Confidence stats row -->
+        <div id="multiFrameStats" class="multi-frame-stats hidden">
+          <div class="stat-pill">
+            <span class="stat-label">Frames used</span>
+            <span id="statFramesUsed" class="stat-value">--</span>
+          </div>
+          <div class="stat-pill">
+            <span class="stat-label">Std Dev</span>
+            <span id="statStdDev" class="stat-value">--</span>
+          </div>
+          <div class="stat-pill">
+            <span class="stat-label">Range</span>
+            <span id="statRange" class="stat-value">--</span>
+          </div>
+        </div>
+
         <!-- Severity gauge -->
         <div class="gauge-container">
           <div class="gauge-bar">
@@ -258,8 +303,8 @@
 
         <!-- Confidence note -->
         <p class="result-note">
-          Model accuracy: MAE ≈ 1.3 g/dL on test set (R² = 0.46).
-          <br/>This estimate can vary ±1–2 g/dL from a lab CBC.
+          Multi-frame median of 30 captures with IQR outlier rejection.
+          <br/>Model MAE ≈ 1.3 g/dL on test set. Not a substitute for a blood test.
         </p>
 
         <!-- Actions -->

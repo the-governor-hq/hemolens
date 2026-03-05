@@ -704,6 +704,175 @@ html, body {
   100% { opacity: 0; }
 }
 
+/* Mini flash for multi-frame */
+.mini-flash {
+  position: absolute;
+  inset: 0;
+  background: rgba(248,113,113,0.12);
+  z-index: 5;
+  animation: miniFlash 0.15s ease-out forwards;
+  pointer-events: none;
+}
+@keyframes miniFlash {
+  0%   { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+
+/* ─── Multi-frame Scan Overlay ─── */
+
+.scan-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(6px);
+  animation: fadeIn 0.25s ease;
+}
+
+.scan-overlay-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 1.5rem;
+}
+
+.scan-ring {
+  width: 110px;
+  height: 110px;
+  filter: drop-shadow(0 0 12px rgba(248,113,113,0.3));
+}
+
+.scan-ring circle:last-of-type {
+  transition: stroke-dashoffset 0.15s ease;
+}
+
+.scan-counter {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -72%);
+  display: flex;
+  align-items: baseline;
+  gap: 1px;
+  pointer-events: none;
+}
+
+.scan-frame-num {
+  font-size: 2rem;
+  font-weight: 800;
+  color: #fff;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.scan-frame-total {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--slate-400);
+}
+
+.scan-label {
+  font-size: 0.8rem;
+  color: var(--slate-300);
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  animation: scanPulseText 1.5s ease-in-out infinite;
+}
+
+@keyframes scanPulseText {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.5; }
+}
+
+/* Live prediction dots */
+.scan-dots {
+  display: flex;
+  gap: 3px;
+  align-items: flex-end;
+  height: 32px;
+  padding: 0 0.25rem;
+}
+
+.scan-dot {
+  width: 5px;
+  border-radius: 2px;
+  background: var(--red-400);
+  opacity: 0.7;
+  animation: dotAppear 0.2s ease;
+  transition: height 0.15s ease;
+}
+
+.scan-dot.outlier {
+  background: var(--slate-600);
+  opacity: 0.35;
+}
+
+@keyframes dotAppear {
+  from { transform: scaleY(0); opacity: 0; }
+  to   { transform: scaleY(1); opacity: 0.7; }
+}
+
+.scan-cancel-btn {
+  margin-top: 0.25rem;
+  padding: 0.35rem 1.25rem;
+  border-radius: 100px;
+  border: 1px solid var(--slate-600);
+  background: transparent;
+  color: var(--slate-400);
+  font-family: var(--font);
+  font-size: 0.75rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.scan-cancel-btn:hover {
+  border-color: var(--slate-400);
+  color: var(--slate-200);
+  background: rgba(255,255,255,0.05);
+}
+
+
+/* ─── Multi-frame Stats Row ─── */
+
+.multi-frame-stats {
+  display: flex;
+  justify-content: center;
+  gap: 0.5rem;
+  margin-bottom: 1.25rem;
+  flex-wrap: wrap;
+}
+
+.stat-pill {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+  background: var(--slate-700);
+  border-radius: var(--radius-sm);
+  padding: 0.4rem 0.75rem;
+  min-width: 72px;
+}
+
+.stat-label {
+  font-size: 0.6rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--slate-400);
+}
+
+.stat-value {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--slate-100);
+  font-variant-numeric: tabular-nums;
+}
+
 
 /* ─── Desktop Responsive ─── */
 

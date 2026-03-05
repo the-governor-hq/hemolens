@@ -4,10 +4,10 @@
    Pipeline:
      1. Load ONNX model via ONNX Runtime Web (WASM backend)
      2. Stream camera via getUserMedia (prefer rear camera)
-     3. On capture: extract nail region from guide overlay
-     4. Preprocess: resize 224×224, ImageNet normalize, CHW layout
-     5. Run inference -> Hb (g/dL)
-     6. Display result with severity classification
+     3. On capture: run multi-frame inference (30 frames)
+     4. Per frame: crop nail ROI, resize 224×224, ImageNet normalize
+     5. Drop outliers via IQR, take median
+     6. Display result with severity classification + confidence stats
    ================================================================ */
 
 // ─── Configuration ───
@@ -16,6 +16,8 @@ const MODEL_PATH = "model/hemolens_hybrid_web.onnx";
 const INPUT_SIZE = 224;
 const IMAGENET_MEAN = [0.485, 0.456, 0.406];
 const IMAGENET_STD  = [0.229, 0.224, 0.225];
+const MULTI_FRAME_COUNT = 30;
+const FRAME_INTERVAL_MS = 80;  // ~12.5 fps capture rate
 
 // WHO anemia severity thresholds (g/dL)
 const SEVERITY = [
@@ -50,6 +52,19 @@ const $severityBadge= document.getElementById("severityBadge");
 const $closeResult  = document.getElementById("closeResult");
 const $retakeBtn    = document.getElementById("retakeBtn");
 
+// Multi-frame scanning overlay
+const $scanOverlay      = document.getElementById("scanOverlay");
+const $scanRingProgress = document.getElementById("scanRingProgress");
+const $scanFrameNum     = document.getElementById("scanFrameNum");
+const $scanDots         = document.getElementById("scanDots");
+const $scanCancelBtn    = document.getElementById("scanCancelBtn");
+
+// Multi-frame stats
+const $multiFrameStats  = document.getElementById("multiFrameStats");
+const $statFramesUsed   = document.getElementById("statFramesUsed");
+const $statStdDev       = document.getElementById("statStdDev");
+const $statRange        = document.getElementById("statRange");
+
 
 // ─── State ───
 
@@ -58,6 +73,7 @@ let currentStream = null;    // MediaStream
 let facingMode = "environment";  // prefer rear camera
 let isProcessing = false;
 let flashOn = false;         // torch state
+let scanAborted = false;     // cancel flag for multi-frame
 
 
 // ─── Model Loading ───
@@ -153,34 +169,22 @@ async function startCamera() {
 }
 
 
-// ─── Capture ───
+// ─── Capture & Multi-Frame Inference ───
 
-function captureFrame() {
-  if (isProcessing) return;
-
+/** Compute crop coordinates from video to nail region */
+function getNailCropRect() {
   const vw = $video.videoWidth;
   const vh = $video.videoHeight;
-  if (!vw || !vh) return;
+  if (!vw || !vh) return null;
 
-  // Flash effect
-  const flash = document.createElement("div");
-  flash.className = "flash";
-  document.querySelector(".camera-container").appendChild(flash);
-  setTimeout(() => flash.remove(), 400);
-
-  // The guide overlay SVG viewBox is 400×500
-  // The nail zone is at: x=130, y=115, w=140, h=105
-  // Map from SVG coords to video coords
   const container = document.querySelector(".camera-container");
   const cRect = container.getBoundingClientRect();
 
-  // SVG viewBox preserveAspectRatio="xMidYMid meet" -> compute actual SVG render area
-  const svgAspect = 400 / 500; // viewBox width / height
+  const svgAspect = 400 / 500;
   const containerAspect = cRect.width / cRect.height;
 
   let svgRenderW, svgRenderH, svgOffsetX, svgOffsetY;
   if (containerAspect > svgAspect) {
-    // Container is wider than SVG -> SVG height fills, width is centered
     svgRenderH = cRect.height;
     svgRenderW = cRect.height * svgAspect;
     svgOffsetX = (cRect.width - svgRenderW) / 2;
@@ -192,10 +196,7 @@ function captureFrame() {
     svgOffsetY = (cRect.height - svgRenderH) / 2;
   }
 
-  // Nail region in SVG coords (matches new overlay)
   const nailSVG = { x: 130, y: 115, w: 140, h: 105 };
-
-  // Convert to pixel coords within container
   const scale = svgRenderW / 400;
   const nailPx = {
     x: svgOffsetX + nailSVG.x * scale,
@@ -204,12 +205,9 @@ function captureFrame() {
     h: nailSVG.h * scale,
   };
 
-  // Convert container pixels to video pixels
-  // Video is object-fit: cover -> need to compute the mapping
   const videoAspect = vw / vh;
   let renderW, renderH, videoOffX, videoOffY;
   if (containerAspect > videoAspect) {
-    // Container wider than video -> video width fills
     renderW = cRect.width;
     renderH = cRect.width / videoAspect;
     videoOffX = 0;
@@ -221,72 +219,267 @@ function captureFrame() {
     videoOffY = 0;
   }
 
-  // Map nail rect from container coords to video coords
   const sx = ((nailPx.x - videoOffX) / renderW) * vw;
   const sy = ((nailPx.y - videoOffY) / renderH) * vh;
   const sw = (nailPx.w / renderW) * vw;
   const sh = (nailPx.h / renderH) * vh;
 
-  // Clamp to video bounds
-  const cropX = Math.max(0, Math.round(sx));
-  const cropY = Math.max(0, Math.round(sy));
-  const cropW = Math.min(Math.round(sw), vw - cropX);
-  const cropH = Math.min(Math.round(sh), vh - cropY);
-
-  // Draw crop to capture canvas
-  $captureCanvas.width = cropW;
-  $captureCanvas.height = cropH;
-  const ctx = $captureCanvas.getContext("2d");
-  ctx.drawImage($video, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
-
-  // Run inference
-  processImage($captureCanvas);
+  return {
+    x: Math.max(0, Math.round(sx)),
+    y: Math.max(0, Math.round(sy)),
+    w: Math.min(Math.round(sw), vw - Math.max(0, Math.round(sx))),
+    h: Math.min(Math.round(sh), vh - Math.max(0, Math.round(sy))),
+  };
 }
 
 
+/** Grab one frame from video and crop to nail region */
+function grabNailFrame(crop) {
+  $captureCanvas.width = crop.w;
+  $captureCanvas.height = crop.h;
+  const ctx = $captureCanvas.getContext("2d");
+  ctx.drawImage($video, crop.x, crop.y, crop.w, crop.h, 0, 0, crop.w, crop.h);
+
+  // Resize to model input
+  const resizeCanvas = document.createElement("canvas");
+  resizeCanvas.width = INPUT_SIZE;
+  resizeCanvas.height = INPUT_SIZE;
+  const rCtx = resizeCanvas.getContext("2d");
+  rCtx.drawImage($captureCanvas, 0, 0, INPUT_SIZE, INPUT_SIZE);
+  return rCtx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE);
+}
+
+
+/** Run inference on a single ImageData → Hb prediction */
+async function inferSingle(imageData) {
+  const pixels = imageData.data;
+  const float32Data = new Float32Array(3 * INPUT_SIZE * INPUT_SIZE);
+  const pixelCount = INPUT_SIZE * INPUT_SIZE;
+
+  for (let i = 0; i < pixelCount; i++) {
+    const r = pixels[i * 4]     / 255.0;
+    const g = pixels[i * 4 + 1] / 255.0;
+    const b = pixels[i * 4 + 2] / 255.0;
+    float32Data[0 * pixelCount + i] = (r - IMAGENET_MEAN[0]) / IMAGENET_STD[0];
+    float32Data[1 * pixelCount + i] = (g - IMAGENET_MEAN[1]) / IMAGENET_STD[1];
+    float32Data[2 * pixelCount + i] = (b - IMAGENET_MEAN[2]) / IMAGENET_STD[2];
+  }
+
+  const inputTensor = new ort.Tensor("float32", float32Data, [1, 3, INPUT_SIZE, INPUT_SIZE]);
+  const results = await session.run({ image: inputTensor });
+  return results.hb_prediction.data[0];
+}
+
+
+/** IQR-based outlier rejection */
+function filterOutliersIQR(values) {
+  if (values.length < 4) return { kept: [...values], rejected: [] };
+
+  const sorted = [...values].sort((a, b) => a - b);
+  const q1 = sorted[Math.floor(sorted.length * 0.25)];
+  const q3 = sorted[Math.floor(sorted.length * 0.75)];
+  const iqr = q3 - q1;
+  const lo = q1 - 1.5 * iqr;
+  const hi = q3 + 1.5 * iqr;
+
+  const kept = [];
+  const rejected = [];
+  for (const v of values) {
+    if (v >= lo && v <= hi) kept.push(v);
+    else rejected.push(v);
+  }
+  return { kept, rejected };
+}
+
+
+/** Compute median of an array */
+function median(arr) {
+  if (arr.length === 0) return 0;
+  const sorted = [...arr].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+
+/** Standard deviation */
+function stdDev(arr) {
+  if (arr.length < 2) return 0;
+  const mean = arr.reduce((a, b) => a + b, 0) / arr.length;
+  const variance = arr.reduce((sum, v) => sum + (v - mean) ** 2, 0) / (arr.length - 1);
+  return Math.sqrt(variance);
+}
+
+
+/** Update the scanning overlay progress */
+function updateScanUI(frameIdx, totalFrames, predictions) {
+  const CIRCUMFERENCE = 2 * Math.PI * 52; // r=52
+  const progress = frameIdx / totalFrames;
+  $scanRingProgress.style.strokeDashoffset = CIRCUMFERENCE * (1 - progress);
+  $scanFrameNum.textContent = frameIdx;
+
+  // Add a dot to the scatter strip
+  if (predictions.length > 0) {
+    const val = predictions[predictions.length - 1];
+    const dot = document.createElement("div");
+    dot.className = "scan-dot";
+    // Height maps Hb 2–20 to 6–30px
+    const h = Math.max(6, Math.min(30, ((val - 2) / 18) * 24 + 6));
+    dot.style.height = h + "px";
+    $scanDots.appendChild(dot);
+  }
+}
+
+
+/** Mark outlier dots in the scatter strip */
+function markOutlierDots(predictions, rejectedIndices) {
+  const dots = $scanDots.querySelectorAll(".scan-dot");
+  for (const idx of rejectedIndices) {
+    if (dots[idx]) dots[idx].classList.add("outlier");
+  }
+}
+
+
+/** Main multi-frame capture */
+async function captureMultiFrame() {
+  if (isProcessing) return;
+
+  const crop = getNailCropRect();
+  if (!crop) return;
+
+  isProcessing = true;
+  scanAborted = false;
+
+  // Initial flash
+  const flash = document.createElement("div");
+  flash.className = "flash";
+  document.querySelector(".camera-container").appendChild(flash);
+  setTimeout(() => flash.remove(), 400);
+
+  // Show scanning overlay
+  $scanDots.innerHTML = "";
+  $scanFrameNum.textContent = "0";
+  $scanRingProgress.style.strokeDashoffset = 2 * Math.PI * 52;
+  $scanOverlay.classList.remove("hidden");
+  $guideOverlay.style.opacity = "0.3";
+
+  const predictions = [];
+  let lastPreviewCanvas = null;
+
+  try {
+    for (let i = 0; i < MULTI_FRAME_COUNT; i++) {
+      if (scanAborted) {
+        console.log("Scan cancelled by user at frame", i);
+        break;
+      }
+
+      // Grab frame
+      const imageData = grabNailFrame(crop);
+
+      // Save a preview canvas from the middle frame
+      if (i === Math.floor(MULTI_FRAME_COUNT / 2)) {
+        lastPreviewCanvas = document.createElement("canvas");
+        lastPreviewCanvas.width = crop.w;
+        lastPreviewCanvas.height = crop.h;
+        const pCtx = lastPreviewCanvas.getContext("2d");
+        pCtx.drawImage($captureCanvas, 0, 0);
+      }
+
+      // Mini flash on each capture
+      const mf = document.createElement("div");
+      mf.className = "mini-flash";
+      document.querySelector(".camera-container").appendChild(mf);
+      setTimeout(() => mf.remove(), 150);
+
+      // Run inference
+      const hb = await inferSingle(imageData);
+      predictions.push(hb);
+
+      // Update UI
+      updateScanUI(i + 1, MULTI_FRAME_COUNT, predictions);
+
+      // Wait between frames
+      if (i < MULTI_FRAME_COUNT - 1) {
+        await sleep(FRAME_INTERVAL_MS);
+      }
+    }
+
+    if (scanAborted || predictions.length === 0) {
+      // Cancelled — silently return
+      return;
+    }
+
+    // IQR outlier rejection
+    const { kept, rejected } = filterOutliersIQR(predictions);
+
+    // Find indices of rejected values to mark dots
+    const rejectedIdxs = [];
+    const usedRejected = new Set();
+    for (let i = 0; i < predictions.length; i++) {
+      const val = predictions[i];
+      // Check if this value is in rejected (handle duplicates)
+      const rIdx = rejected.findIndex((r, ri) => r === val && !usedRejected.has(ri));
+      if (rIdx !== -1) {
+        rejectedIdxs.push(i);
+        usedRejected.add(rIdx);
+      }
+    }
+    markOutlierDots(predictions, rejectedIdxs);
+
+    // Brief pause to show outlier markings
+    await sleep(400);
+
+    // Compute final result
+    const finalHb = median(kept);
+    const sd = stdDev(kept);
+    const range = kept.length > 0
+      ? (Math.max(...kept) - Math.min(...kept))
+      : 0;
+
+    // Use preview canvas or fallback
+    if (!lastPreviewCanvas) {
+      lastPreviewCanvas = document.createElement("canvas");
+      lastPreviewCanvas.width = crop.w;
+      lastPreviewCanvas.height = crop.h;
+      const ctx = lastPreviewCanvas.getContext("2d");
+      ctx.drawImage($captureCanvas, 0, 0);
+    }
+
+    // Show result
+    showResult(lastPreviewCanvas, finalHb, {
+      framesUsed: kept.length,
+      framesTotal: predictions.length,
+      stdDev: sd,
+      range: range,
+    });
+
+  } catch (err) {
+    console.error("Multi-frame inference error:", err);
+    alert("Inference failed: " + err.message);
+  } finally {
+    $scanOverlay.classList.add("hidden");
+    $guideOverlay.style.opacity = "";
+    isProcessing = false;
+  }
+}
+
+
+/** Single-image inference (for file upload) */
 async function processImage(sourceCanvas) {
   if (isProcessing) return;
   isProcessing = true;
 
-  // Show scanning animation
   $scanLine.classList.remove("hidden");
 
   try {
-    // 1. Resize to 224×224
     const resizeCanvas = document.createElement("canvas");
     resizeCanvas.width = INPUT_SIZE;
     resizeCanvas.height = INPUT_SIZE;
     const rCtx = resizeCanvas.getContext("2d");
     rCtx.drawImage(sourceCanvas, 0, 0, INPUT_SIZE, INPUT_SIZE);
-
-    // 2. Get pixel data
     const imageData = rCtx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE);
-    const pixels = imageData.data; // RGBA
 
-    // 3. Preprocess: normalize with ImageNet stats, CHW layout
-    const float32Data = new Float32Array(3 * INPUT_SIZE * INPUT_SIZE);
-    const pixelCount = INPUT_SIZE * INPUT_SIZE;
-
-    for (let i = 0; i < pixelCount; i++) {
-      const r = pixels[i * 4]     / 255.0;
-      const g = pixels[i * 4 + 1] / 255.0;
-      const b = pixels[i * 4 + 2] / 255.0;
-
-      // CHW layout: [C, H, W]
-      float32Data[0 * pixelCount + i] = (r - IMAGENET_MEAN[0]) / IMAGENET_STD[0]; // R
-      float32Data[1 * pixelCount + i] = (g - IMAGENET_MEAN[1]) / IMAGENET_STD[1]; // G
-      float32Data[2 * pixelCount + i] = (b - IMAGENET_MEAN[2]) / IMAGENET_STD[2]; // B
-    }
-
-    // 4. Create tensor
-    const inputTensor = new ort.Tensor("float32", float32Data, [1, 3, INPUT_SIZE, INPUT_SIZE]);
-
-    // 5. Run inference
-    const results = await session.run({ image: inputTensor });
-    const hbPrediction = results.hb_prediction.data[0];
-
-    // 6. Show result
-    showResult(sourceCanvas, hbPrediction);
+    const hb = await inferSingle(imageData);
+    showResult(sourceCanvas, hb, null);
 
   } catch (err) {
     console.error("Inference error:", err);
@@ -300,7 +493,7 @@ async function processImage(sourceCanvas) {
 
 // ─── Result Display ───
 
-function showResult(sourceCanvas, hbValue) {
+function showResult(sourceCanvas, hbValue, stats) {
   // Clamp to reasonable range
   const hb = Math.max(2, Math.min(20, hbValue));
 
@@ -331,6 +524,16 @@ function showResult(sourceCanvas, hbValue) {
   };
   $hbValue.style.color = colorMap[severity.cls] || "#fff";
 
+  // Multi-frame stats (if available)
+  if (stats && $multiFrameStats) {
+    $statFramesUsed.textContent = stats.framesUsed + "/" + stats.framesTotal;
+    $statStdDev.textContent = stats.stdDev.toFixed(2);
+    $statRange.textContent = stats.range.toFixed(2);
+    $multiFrameStats.classList.remove("hidden");
+  } else if ($multiFrameStats) {
+    $multiFrameStats.classList.add("hidden");
+  }
+
   // Show result panel
   $resultSection.classList.remove("hidden");
 }
@@ -359,6 +562,7 @@ function hideResult() {
   $gaugeMarker.style.left = "50%";
   $hbValue.textContent = "--";
   $hbValue.style.color = "#fff";
+  if ($multiFrameStats) $multiFrameStats.classList.add("hidden");
 }
 
 
@@ -385,7 +589,11 @@ function handleFileUpload(file) {
 
 // ─── Event Listeners ───
 
-$captureBtn.addEventListener("click", captureFrame);
+$captureBtn.addEventListener("click", captureMultiFrame);
+
+$scanCancelBtn.addEventListener("click", () => {
+  scanAborted = true;
+});
 
 $switchBtn.addEventListener("click", () => {
   facingMode = facingMode === "environment" ? "user" : "environment";
@@ -406,11 +614,17 @@ $retakeBtn.addEventListener("click", hideResult);
 
 // Keyboard shortcut: Space to capture
 document.addEventListener("keydown", (e) => {
-  if (e.code === "Space" && !$resultSection.classList.contains("hidden") === false) {
+  if (e.code === "Space" && $resultSection.classList.contains("hidden") && !isProcessing) {
     e.preventDefault();
-    captureFrame();
+    captureMultiFrame();
   }
-  if (e.code === "Escape") hideResult();
+  if (e.code === "Escape") {
+    if (!$scanOverlay.classList.contains("hidden")) {
+      scanAborted = true;
+    } else {
+      hideResult();
+    }
+  }
 });
 
 
