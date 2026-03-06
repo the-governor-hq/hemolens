@@ -13,6 +13,7 @@
 // ─── Configuration ───
 
 const MODEL_PATH = "model/hemolens_hybrid_web.onnx";
+const COLOR_MODEL_PATH = "model/hemolens_hybrid_color.onnx";
 const DETECTOR_PATH = "model/nail_detector.onnx";
 const INPUT_SIZE = 224;
 const IMAGENET_MEAN = [0.485, 0.456, 0.406];
@@ -114,7 +115,9 @@ const $debugFramesGrid = document.getElementById("debugFramesGrid");
 
 // ─── State ───
 
-let session = null;          // ONNX Runtime inference session
+let session = null;          // ONNX Runtime inference session (CNN-only, fallback)
+let colorSession = null;     // ONNX Runtime inference session (CNN + color features)
+let colorModelAvailable = false; // whether the dual-input colour model is loaded
 let nailDetector = null;     // NailDetector instance (YOLOv8-nano)
 let detectorAvailable = false; // whether nail_detector.onnx loaded successfully
 let currentStream = null;    // MediaStream
@@ -668,8 +671,25 @@ async function loadModel() {
 
     console.log("Hb session created. Inputs:", session.inputNames, "Outputs:", session.outputNames);
 
+    // Try loading the dual-input colour model (non-blocking — fall back to CNN-only)
+    updateSplash("Loading colour model...", 60);
+    try {
+      const colorResp = await fetch(COLOR_MODEL_PATH);
+      if (!colorResp.ok) throw new Error("HTTP " + colorResp.status);
+      const colorBuf = await colorResp.arrayBuffer();
+      colorSession = await ort.InferenceSession.create(colorBuf, {
+        executionProviders: ["wasm"],
+        graphOptimizationLevel: "all",
+      });
+      colorModelAvailable = true;
+      console.log("[ColorModel] Loaded. Inputs:", colorSession.inputNames, "Outputs:", colorSession.outputNames);
+    } catch (colorErr) {
+      console.warn("[ColorModel] Not available, using CNN-only model:", colorErr.message);
+      colorModelAvailable = false;
+    }
+
     // Try loading the nail detector (non-blocking — fallback to guide overlay if absent)
-    updateSplash("Loading nail detector...", 70);
+    updateSplash("Loading nail detector...", 75);
     try {
       nailDetector = new NailDetector({ confThreshold: 0.35, iouThreshold: 0.45 });
       await nailDetector.load(DETECTOR_PATH);
@@ -912,8 +932,16 @@ function preprocessCanvasToImageData(srcCanvas) {
 }
 
 
-/** Run inference on a single ImageData → Hb prediction */
-async function inferSingle(imageData) {
+/**
+ * Run inference on a single ImageData → Hb prediction.
+ *
+ * When colorFeatures (Float32Array[67]) is provided AND the colour
+ * ONNX model is loaded, runs the dual-input model.  Otherwise falls
+ * back to the CNN-only model.
+ */
+async function inferSingle(imageData, colorFeatures) {
+  const useColorModel = colorModelAvailable && colorSession && colorFeatures;
+
   function toTensorData(flipX) {
     const pixels = imageData.data;
     const float32Data = new Float32Array(3 * INPUT_SIZE * INPUT_SIZE);
@@ -940,8 +968,15 @@ async function inferSingle(imageData) {
 
   async function runOnce(flipX) {
     const inputTensor = new ort.Tensor("float32", toTensorData(flipX), [1, 3, INPUT_SIZE, INPUT_SIZE]);
-    const results = await session.run({ image: inputTensor });
-    return results.hb_prediction.data[0];
+
+    if (useColorModel) {
+      const colorTensor = new ort.Tensor("float32", colorFeatures, [1, colorFeatures.length]);
+      const results = await colorSession.run({ image: inputTensor, color_features: colorTensor });
+      return results.hb_prediction.data[0];
+    } else {
+      const results = await session.run({ image: inputTensor });
+      return results.hb_prediction.data[0];
+    }
   }
 
   const y1 = await runOnce(false);
@@ -1136,6 +1171,8 @@ async function captureMultiFrame() {
 
       let imageData;
 
+      let frameColorFeatures = null; // per-frame colour features (or null)
+
       if (useDetector) {
         // ── Auto-detection path: detect nails, crop the best one ──
         const frame = grabFullFrame();
@@ -1167,6 +1204,22 @@ async function captureMultiFrame() {
 
         // Crop and preprocess the detected nail
         imageData = cropDetectedNail(frame.canvas, bestNail);
+
+        // ── Colour features: extract from raw nail + skin ROI pixels ──
+        if (colorModelAvailable && typeof extractColorFeatures === "function") {
+          try {
+            const nailROI = getRoiImageData(frame.canvas, bestNail);
+            const skins = detections.filter(d => d.className === "skin");
+            if (skins.length > 0) {
+              // Pick the largest (or most confident) skin detection
+              skins.sort((a, b) => (b.w * b.h * b.confidence) - (a.w * a.h * a.confidence));
+              const skinROI = getRoiImageData(frame.canvas, skins[0]);
+              frameColorFeatures = extractColorFeatures(nailROI, skinROI);
+            }
+          } catch (cfErr) {
+            console.warn("[ColorFeatures] Extraction failed for frame", i, cfErr.message);
+          }
+        }
 
         // Save preview from best detection
         if (!lastPreviewCanvas || i === Math.floor(MULTI_FRAME_COUNT / 2)) {
@@ -1235,8 +1288,8 @@ async function captureMultiFrame() {
       document.querySelector(".camera-container").appendChild(mf);
       setTimeout(() => mf.remove(), 150);
 
-      // Run inference
-      const hb = await inferSingle(imageData);
+      // Run inference (pass colour features when available)
+      const hb = await inferSingle(imageData, frameColorFeatures);
       predictions.push(hb);
       predIdxToFrameIdx.push(frameTiles.length - 1);
 
@@ -1375,6 +1428,22 @@ async function processImage(sourceCanvas) {
 
       console.log(`[Upload] Detected ${nails.length} nail(s), running Hb inference on each...`);
 
+      // Compute colour features once for the upload image (use first nail + first skin)
+      let uploadColorFeatures = null;
+      if (colorModelAvailable && typeof extractColorFeatures === "function") {
+        try {
+          const skins = detections.filter(d => d.className === "skin");
+          if (nails.length > 0 && skins.length > 0) {
+            skins.sort((a, b) => (b.w * b.h * b.confidence) - (a.w * a.h * a.confidence));
+            const nailROI = getRoiImageData(sourceCanvas, nails[0]);
+            const skinROI = getRoiImageData(sourceCanvas, skins[0]);
+            uploadColorFeatures = extractColorFeatures(nailROI, skinROI);
+          }
+        } catch (cfErr) {
+          console.warn("[ColorFeatures] Extraction failed for upload:", cfErr.message);
+        }
+      }
+
       // Run inference on each detected nail and average
       const nailPredictions = [];
       for (const nail of nails) {
@@ -1384,7 +1453,7 @@ async function processImage(sourceCanvas) {
           console.log(`[Upload] Nail at (${nail.x.toFixed(0)}, ${nail.y.toFixed(0)}) invalid, skipping`);
           continue;
         }
-        const hb = await inferSingle(nailImageData);
+        const hb = await inferSingle(nailImageData, uploadColorFeatures);
         console.log(`[Upload] Nail conf=${nail.confidence.toFixed(2)} → Hb=${hb.toFixed(1)}`);
         nailPredictions.push(hb);
       }
