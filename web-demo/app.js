@@ -35,6 +35,20 @@ const AUTO_CAPTURE_CONF        = 0.72; // min confidence to count toward auto-ca
 const AUTO_CAPTURE_HOLD_FRAMES = 7;    // consecutive live-detect frames required (~1 s at 6 fps)
 let   _highConfConsec          = 0;    // running counter of consecutive high-conf frames
 
+// Detector crop / selection heuristics.
+// The Hb model was trained on tight nail crops, so loose detector crops and
+// unrelated skin ROIs can push web predictions out-of-distribution.
+const DETECTION_SELECTION = {
+  minConfidence: 0.45,
+  minAreaFrac: 0.007,
+  maxAreaFrac: 0.45,
+  minAspect: 0.45,
+  maxAspect: 2.40,
+  minEdgeMarginFrac: 0.008,
+  cropInsetFrac: 0.04,
+  trackBlend: 0.7,
+};
+
 // Frame validity gates (to avoid "normal" results on blocked/black frames)
 // These thresholds are intentionally conservative and should be tuned with real captures.
 const MIN_VALID_FRAMES = 10;
@@ -256,9 +270,9 @@ async function _runLiveDetect() {
 
     _drawDetectionBoxes(ctx, detections, scale, offX, offY, cw2, ch2);
 
-    // ── Auto-capture: start scan immediately when nail confidence stays high ──
-    const nailHits  = detections.filter(d => d.className === "nail");
-    const bestConf  = nailHits.length > 0 ? nailHits[0].confidence : 0;
+    // ── Auto-capture: only trigger on a usable, well-positioned nail ──
+    const bestLiveNail = pickBestNail(detections, vw, vh);
+    const bestConf = bestLiveNail ? bestLiveNail.confidence : 0;
     if (!isProcessing && bestConf >= AUTO_CAPTURE_CONF) {
       _highConfConsec++;
 
@@ -897,32 +911,139 @@ function grabFullFrame() {
 }
 
 
+function clamp01(v) {
+  return Math.max(0, Math.min(1, v));
+}
+
+function getBoxCenter(box) {
+  return {
+    x: box.x + box.w / 2,
+    y: box.y + box.h / 2,
+  };
+}
+
+function centerDistanceNorm(a, b, frameW, frameH) {
+  const diag = Math.hypot(frameW, frameH) || 1;
+  return Math.hypot(a.x - b.x, a.y - b.y) / diag;
+}
+
+function getDetectionRect(detection, srcW, srcH, insetFrac = DETECTION_SELECTION.cropInsetFrac) {
+  const insetX = detection.w * insetFrac;
+  const insetY = detection.h * insetFrac;
+  const x = Math.max(0, Math.round(detection.x + insetX));
+  const y = Math.max(0, Math.round(detection.y + insetY));
+  const maxX = Math.min(srcW, Math.round(detection.x + detection.w - insetX));
+  const maxY = Math.min(srcH, Math.round(detection.y + detection.h - insetY));
+  return {
+    x,
+    y,
+    w: Math.max(1, maxX - x),
+    h: Math.max(1, maxY - y),
+  };
+}
+
+function intersectionArea(a, b) {
+  const x1 = Math.max(a.x, b.x);
+  const y1 = Math.max(a.y, b.y);
+  const x2 = Math.min(a.x + a.w, b.x + b.w);
+  const y2 = Math.min(a.y + a.h, b.y + b.h);
+  return Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+}
+
+function isUsableNailDetection(detection, frameW, frameH) {
+  if (!detection || detection.className !== "nail") return false;
+
+  const areaFrac = (detection.w * detection.h) / Math.max(1, frameW * frameH);
+  const aspect = detection.w / Math.max(1e-6, detection.h);
+  const edgeMargin = Math.min(
+    detection.x,
+    detection.y,
+    frameW - (detection.x + detection.w),
+    frameH - (detection.y + detection.h),
+  ) / Math.max(1, Math.min(frameW, frameH));
+
+  return (
+    detection.confidence >= DETECTION_SELECTION.minConfidence &&
+    areaFrac >= DETECTION_SELECTION.minAreaFrac &&
+    areaFrac <= DETECTION_SELECTION.maxAreaFrac &&
+    aspect >= DETECTION_SELECTION.minAspect &&
+    aspect <= DETECTION_SELECTION.maxAspect &&
+    edgeMargin >= DETECTION_SELECTION.minEdgeMarginFrac
+  );
+}
+
+function scoreNailDetection(detection, frameW, frameH, anchorCenter = null) {
+  const frameCenter = { x: frameW / 2, y: frameH / 2 };
+  const center = getBoxCenter(detection);
+  const areaFrac = (detection.w * detection.h) / Math.max(1, frameW * frameH);
+  const confScore = clamp01((detection.confidence - DETECTION_SELECTION.minConfidence) / (1 - DETECTION_SELECTION.minConfidence));
+  const areaScore = clamp01((areaFrac - DETECTION_SELECTION.minAreaFrac) / 0.10);
+  const centralityScore = 1 - clamp01(centerDistanceNorm(center, frameCenter, frameW, frameH) / 0.45);
+
+  let trackScore = 0;
+  if (anchorCenter) {
+    trackScore = 1 - clamp01(centerDistanceNorm(center, anchorCenter, frameW, frameH) / 0.22);
+  }
+
+  return confScore * 1.4 + areaScore * 1.2 + centralityScore * 0.8 + trackScore * 1.6;
+}
+
+
 /** Crop a detected nail bounding box from a canvas, preprocess for Hb model */
 function cropDetectedNail(srcCanvas, detection) {
-  // Add 10% padding around the detection box
-  const pad = 0.10;
-  const px = Math.max(0, Math.round(detection.x - detection.w * pad));
-  const py = Math.max(0, Math.round(detection.y - detection.h * pad));
-  const pw = Math.min(Math.round(detection.w * (1 + 2 * pad)), srcCanvas.width - px);
-  const ph = Math.min(Math.round(detection.h * (1 + 2 * pad)), srcCanvas.height - py);
+  // Match training more closely: use a tight crop instead of padded context.
+  const rect = getDetectionRect(detection, srcCanvas.width, srcCanvas.height);
 
   const cropCanvas = document.createElement("canvas");
-  cropCanvas.width = pw;
-  cropCanvas.height = ph;
+  cropCanvas.width = rect.w;
+  cropCanvas.height = rect.h;
   const ctx = cropCanvas.getContext("2d");
-  ctx.drawImage(srcCanvas, px, py, pw, ph, 0, 0, pw, ph);
+  ctx.drawImage(srcCanvas, rect.x, rect.y, rect.w, rect.h, 0, 0, rect.w, rect.h);
 
   return preprocessCanvasToImageData(cropCanvas);
 }
 
 
-/** Pick the best nail detection from a list (highest confidence, class=nail) */
-function pickBestNail(detections) {
-  const nails = detections.filter(d => d.className === "nail");
+/** Pick the best nail detection from a list, favoring usable, centered, stable nails. */
+function pickBestNail(detections, frameW, frameH, anchorCenter = null) {
+  const nails = detections.filter(d => isUsableNailDetection(d, frameW, frameH));
   if (nails.length === 0) return null;
-  // Pick the one with largest area × confidence product (prefer big, confident nails)
-  nails.sort((a, b) => (b.w * b.h * b.confidence) - (a.w * a.h * a.confidence));
+  nails.sort((a, b) => scoreNailDetection(b, frameW, frameH, anchorCenter) - scoreNailDetection(a, frameW, frameH, anchorCenter));
   return nails[0];
+}
+
+function updateTrackedCenter(currentCenter, detection) {
+  const nextCenter = getBoxCenter(detection);
+  if (!currentCenter) return nextCenter;
+  const blend = DETECTION_SELECTION.trackBlend;
+  return {
+    x: currentCenter.x * blend + nextCenter.x * (1 - blend),
+    y: currentCenter.y * blend + nextCenter.y * (1 - blend),
+  };
+}
+
+function pickNearestSkin(detections, nail, frameW, frameH) {
+  const skins = detections.filter(d => d.className === "skin");
+  if (skins.length === 0) return null;
+
+  const nailCenter = getBoxCenter(nail);
+  let best = null;
+  let bestScore = -Infinity;
+
+  for (const skin of skins) {
+    const skinCenter = getBoxCenter(skin);
+    const distScore = 1 - clamp01(centerDistanceNorm(nailCenter, skinCenter, frameW, frameH) / 0.35);
+    const overlapScore = clamp01(intersectionArea(nail, skin) / Math.max(1, nail.w * nail.h));
+    const areaRatio = (skin.w * skin.h) / Math.max(1, nail.w * nail.h);
+    const ratioScore = 1 - clamp01(Math.abs(Math.log(Math.max(areaRatio, 1e-6))) / 2.5);
+    const score = distScore * 1.2 + overlapScore * 1.4 + ratioScore * 0.5 + clamp01(skin.confidence) * 0.2;
+    if (score > bestScore) {
+      bestScore = score;
+      best = skin;
+    }
+  }
+
+  return best;
 }
 
 
@@ -1233,6 +1354,7 @@ async function captureMultiFrame() {
   let invalidFrames = 0;
   let noDetectionFrames = 0; // frames where detector found no nails
   let lastPreviewCanvas = null;
+  let trackedNailCenter = null;
 
   try {
     for (let i = 0; i < MULTI_FRAME_COUNT; i++) {
@@ -1249,7 +1371,7 @@ async function captureMultiFrame() {
         // ── Auto-detection path: detect nails, crop the best one ──
         const frame = grabFullFrame();
         const detections = await nailDetector.detect(frame.imageData, frame.width, frame.height);
-        const bestNail = pickBestNail(detections);
+        const bestNail = pickBestNail(detections, frame.width, frame.height, trackedNailCenter);
 
         if (!bestNail) {
           noDetectionFrames++;
@@ -1274,18 +1396,18 @@ async function captureMultiFrame() {
           continue;
         }
 
+        trackedNailCenter = updateTrackedCenter(trackedNailCenter, bestNail);
+
         // Crop and preprocess the detected nail
         imageData = cropDetectedNail(frame.canvas, bestNail);
 
         // ── Colour features: extract from raw nail + skin ROI pixels ──
         if (colorModelAvailable && typeof extractColorFeatures === "function") {
           try {
-            const nailROI = getRoiImageData(frame.canvas, bestNail);
-            const skins = detections.filter(d => d.className === "skin");
-            if (skins.length > 0) {
-              // Pick the largest (or most confident) skin detection
-              skins.sort((a, b) => (b.w * b.h * b.confidence) - (a.w * a.h * a.confidence));
-              const skinROI = getRoiImageData(frame.canvas, skins[0]);
+            const nailROI = getRoiImageData(frame.canvas, getDetectionRect(bestNail, frame.width, frame.height));
+            const bestSkin = pickNearestSkin(detections, bestNail, frame.width, frame.height);
+            if (bestSkin) {
+              const skinROI = getRoiImageData(frame.canvas, getDetectionRect(bestSkin, frame.width, frame.height, 0));
               frameColorFeatures = extractColorFeatures(nailROI, skinROI);
             }
           } catch (cfErr) {
@@ -1491,40 +1613,42 @@ async function processImage(sourceCanvas) {
       const fullImageData = ctx.getImageData(0, 0, w, h);
 
       const detections = await nailDetector.detect(fullImageData, w, h);
-      const nails = detections.filter(d => d.className === "nail");
+      const nails = detections.filter(d => isUsableNailDetection(d, w, h));
 
       if (nails.length === 0) {
         alert("No fingernails detected in this image. Please upload a photo showing your fingernails clearly.");
         return;
       }
 
-      console.log(`[Upload] Detected ${nails.length} nail(s), running Hb inference on each...`);
+      nails.sort((a, b) => scoreNailDetection(b, w, h) - scoreNailDetection(a, w, h));
+      const selectedNails = nails.slice(0, 3);
 
-      // Compute colour features once for the upload image (use first nail + first skin)
-      let uploadColorFeatures = null;
-      if (colorModelAvailable && typeof extractColorFeatures === "function") {
-        try {
-          const skins = detections.filter(d => d.className === "skin");
-          if (nails.length > 0 && skins.length > 0) {
-            skins.sort((a, b) => (b.w * b.h * b.confidence) - (a.w * a.h * a.confidence));
-            const nailROI = getRoiImageData(sourceCanvas, nails[0]);
-            const skinROI = getRoiImageData(sourceCanvas, skins[0]);
-            uploadColorFeatures = extractColorFeatures(nailROI, skinROI);
-          }
-        } catch (cfErr) {
-          console.warn("[ColorFeatures] Extraction failed for upload:", cfErr.message);
-        }
-      }
+      console.log(`[Upload] Detected ${nails.length} usable nail(s), running Hb inference on ${selectedNails.length}...`);
 
       // Run inference on each detected nail and average
       const nailPredictions = [];
-      for (const nail of nails) {
+      for (const nail of selectedNails) {
         const nailImageData = cropDetectedNail(sourceCanvas, nail);
         const validity = isFrameValid(nailImageData);
         if (!validity.ok) {
           console.log(`[Upload] Nail at (${nail.x.toFixed(0)}, ${nail.y.toFixed(0)}) invalid, skipping`);
           continue;
         }
+
+        let uploadColorFeatures = null;
+        if (colorModelAvailable && typeof extractColorFeatures === "function") {
+          try {
+            const bestSkin = pickNearestSkin(detections, nail, w, h);
+            if (bestSkin) {
+              const nailROI = getRoiImageData(sourceCanvas, getDetectionRect(nail, w, h));
+              const skinROI = getRoiImageData(sourceCanvas, getDetectionRect(bestSkin, w, h, 0));
+              uploadColorFeatures = extractColorFeatures(nailROI, skinROI);
+            }
+          } catch (cfErr) {
+            console.warn("[ColorFeatures] Extraction failed for upload nail:", cfErr.message);
+          }
+        }
+
         const hb = await inferSingle(nailImageData, uploadColorFeatures);
         console.log(`[Upload] Nail conf=${nail.confidence.toFixed(2)} → Hb=${hb.toFixed(1)}`);
         nailPredictions.push(hb);
@@ -1549,7 +1673,7 @@ async function processImage(sourceCanvas) {
 
       showResult(sourceCanvas, finalHb, nailPredictions.length > 1 ? {
         framesUsed: nailPredictions.length,
-        framesTotal: nails.length,
+        framesTotal: selectedNails.length,
         stdDev: stdDev(nailPredictions),
         range: nailPredictions.length > 1 ? Math.max(...nailPredictions) - Math.min(...nailPredictions) : 0,
         unreliable: false,
