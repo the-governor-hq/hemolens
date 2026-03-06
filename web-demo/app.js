@@ -14,6 +14,8 @@
 
 const MODEL_PATH = "model/hemolens_hybrid_web.onnx";
 const COLOR_MODEL_PATH = "model/hemolens_hybrid_color.onnx";
+const BACKBONE_PATH = "model/hemolens_backbone.onnx";
+const CATBOOST_PATH = "model/hemolens_catboost_head.onnx";
 const DETECTOR_PATH = "model/nail_detector.onnx";
 const INPUT_SIZE = 224;
 const IMAGENET_MEAN = [0.485, 0.456, 0.406];
@@ -116,8 +118,13 @@ const $debugFramesGrid = document.getElementById("debugFramesGrid");
 // ─── State ───
 
 let session = null;          // ONNX Runtime inference session (CNN-only, fallback)
-let colorSession = null;     // ONNX Runtime inference session (CNN + color features)
+let colorSession = null;     // ONNX Runtime inference session (CNN + color Ridge)
 let colorModelAvailable = false; // whether the dual-input colour model is loaded
+let backboneSession = null;  // ONNX Runtime inference session (backbone → 1280-d features)
+let catboostSession = null;  // ONNX Runtime inference session (CatBoost head 1347 → Hb)
+let catboostAvailable = false; // whether the two-stage CatBoost model is loaded
+let catboostInputName = "features";  // ONNX input name for CatBoost head
+let catboostOutputName = "predictions"; // ONNX output name for CatBoost head
 let nailDetector = null;     // NailDetector instance (YOLOv8-nano)
 let detectorAvailable = false; // whether nail_detector.onnx loaded successfully
 let currentStream = null;    // MediaStream
@@ -671,8 +678,35 @@ async function loadModel() {
 
     console.log("Hb session created. Inputs:", session.inputNames, "Outputs:", session.outputNames);
 
+    // Try loading two-stage CatBoost model (backbone + CatBoost head)
+    // Priority: CatBoost (MAE≈1.30) > Ridge+Color (MAE≈1.46) > CNN-only
+    updateSplash("Loading CatBoost model...", 58);
+    try {
+      const [bbResp, cbResp] = await Promise.all([
+        fetch(BACKBONE_PATH),
+        fetch(CATBOOST_PATH),
+      ]);
+      if (!bbResp.ok) throw new Error("Backbone HTTP " + bbResp.status);
+      if (!cbResp.ok) throw new Error("CatBoost HTTP " + cbResp.status);
+      const [bbBuf, cbBuf] = await Promise.all([
+        bbResp.arrayBuffer(),
+        cbResp.arrayBuffer(),
+      ]);
+      const ortOpts = { executionProviders: ["wasm"], graphOptimizationLevel: "all" };
+      backboneSession = await ort.InferenceSession.create(bbBuf, ortOpts);
+      catboostSession = await ort.InferenceSession.create(cbBuf, ortOpts);
+      catboostInputName = catboostSession.inputNames[0];
+      catboostOutputName = catboostSession.outputNames[0];
+      catboostAvailable = true;
+      console.log("[CatBoost] Loaded. Backbone inputs:", backboneSession.inputNames,
+                  "CatBoost input:", catboostInputName, "output:", catboostOutputName);
+    } catch (cbErr) {
+      console.warn("[CatBoost] Not available:", cbErr.message);
+      catboostAvailable = false;
+    }
+
     // Try loading the dual-input colour model (non-blocking — fall back to CNN-only)
-    updateSplash("Loading colour model...", 60);
+    updateSplash("Loading colour model...", 64);
     try {
       const colorResp = await fetch(COLOR_MODEL_PATH);
       if (!colorResp.ok) throw new Error("HTTP " + colorResp.status);
@@ -689,7 +723,7 @@ async function loadModel() {
     }
 
     // Try loading the nail detector (non-blocking — fallback to guide overlay if absent)
-    updateSplash("Loading nail detector...", 75);
+    updateSplash("Loading nail detector...", 78);
     try {
       nailDetector = new NailDetector({ confThreshold: 0.35, iouThreshold: 0.45 });
       await nailDetector.load(DETECTOR_PATH);
@@ -935,12 +969,17 @@ function preprocessCanvasToImageData(srcCanvas) {
 /**
  * Run inference on a single ImageData → Hb prediction.
  *
- * When colorFeatures (Float32Array[67]) is provided AND the colour
- * ONNX model is loaded, runs the dual-input model.  Otherwise falls
- * back to the CNN-only model.
+ * Model priority (highest accuracy first):
+ *   1. CatBoost two-stage (backbone → features → CatBoost)  MAE≈1.30
+ *   2. Ridge + colour dual-input ONNX                       MAE≈1.46
+ *   3. CNN-only single-input ONNX (fallback)
+ *
+ * For CatBoost: TTA averages *features* before the CatBoost head,
+ * matching training where each crop's feature was TTA-averaged.
  */
 async function inferSingle(imageData, colorFeatures) {
-  const useColorModel = colorModelAvailable && colorSession && colorFeatures;
+  const useCatBoost  = catboostAvailable && backboneSession && catboostSession && colorFeatures;
+  const useColorModel = !useCatBoost && colorModelAvailable && colorSession && colorFeatures;
 
   function toTensorData(flipX) {
     const pixels = imageData.data;
@@ -966,6 +1005,39 @@ async function inferSingle(imageData, colorFeatures) {
     return float32Data;
   }
 
+  // ── CatBoost two-stage path ──
+  if (useCatBoost) {
+    async function backboneFeatures(flipX) {
+      const t = new ort.Tensor("float32", toTensorData(flipX), [1, 3, INPUT_SIZE, INPUT_SIZE]);
+      const r = await backboneSession.run({ image: t });
+      return r.features.data;                       // Float32Array(1280)
+    }
+
+    // TTA: average backbone features (matches training pipeline)
+    const feat1 = await backboneFeatures(false);
+    let avgFeat;
+    if (useFlipTTA) {
+      const feat2 = await backboneFeatures(true);
+      avgFeat = new Float32Array(feat1.length);
+      for (let i = 0; i < feat1.length; i++) avgFeat[i] = (feat1[i] + feat2[i]) / 2;
+    } else {
+      avgFeat = new Float32Array(feat1);            // copy
+    }
+
+    // Concatenate CNN features + colour features → 1347-d
+    const combined = new Float32Array(avgFeat.length + colorFeatures.length);
+    combined.set(avgFeat, 0);
+    combined.set(colorFeatures, avgFeat.length);
+
+    const combinedTensor = new ort.Tensor("float32", combined, [1, combined.length]);
+    const feeds = {};
+    feeds[catboostInputName] = combinedTensor;
+    const results = await catboostSession.run(feeds);
+    const hb = results[catboostOutputName].data[0];
+    return typeof hb === "number" ? hb : hb[0];     // CatBoost may return [1,1]
+  }
+
+  // ── Ridge colour or CNN-only path ──
   async function runOnce(flipX) {
     const inputTensor = new ort.Tensor("float32", toTensorData(flipX), [1, 3, INPUT_SIZE, INPUT_SIZE]);
 
