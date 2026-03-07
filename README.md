@@ -2,6 +2,10 @@
 
 **An experimental, on-device pipeline for non-invasive hemoglobin level estimation.**
 
+
+https://github.com/user-attachments/assets/9e9e381f-a6ea-497d-b09b-811b4d2c4230
+
+
 A two-stage browser pipeline: **YOLOv8-nano nail detector** → **MobileNetV4 Hb regression**, both running as ONNX models client-side via ONNX Runtime Web. Trained on the 2024 Yakimov et al. fingernail dataset (250 patients, single center).
 
 - **Nail detection**: mAP50 = 0.995, Precision = 0.982, Recall = 1.000 (YOLOv8n, 320×320)
